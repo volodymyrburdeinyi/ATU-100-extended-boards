@@ -6,7 +6,7 @@ Fork of the [N7DDC ATU-100](https://github.com/Dfinitski/N7DDC-ATU-100-mini-and-
 
 ## EEPROM configuration
 
-256 bytes, 100 000 write cycles. Written once at first power-on from the `initial_eeprom[]` table in `main.c`. To reconfigure, write the cell directly (MPLAB programmer, UART `c HH VV` command, or PICkit).
+256 bytes, 100 000 write cycles. Initial values are embedded in the hex file via `initial_eeprom[]` in `main.c` and programmed by PICkit at flash time. To reconfigure individual cells after deployment, use the MPLAB programmer or PICkit directly.
 
 ### Settings (0x00–0x0F)
 
