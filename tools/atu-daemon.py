@@ -18,7 +18,7 @@ keys (no Enter needed):
   t       tune current band (shown in display)
   r       reset relays to zero
   ?       query ATU status
-  :       enter command line (Esc to cancel)
+  :       enter command line (Enter to send, Esc to cancel)
   h       this help
   q       quit
 
@@ -189,13 +189,14 @@ st = {
     'enc':         0,
     'tx':          False,
     'swr':         0,
-    'status':      'waiting for WSJT-X',
+    'status':      'ready — press h for help',
     'status_time': 0.0,
     'retrying':    False,
     'line_mode':   False,
     'line_buf':    '',
     'quit':        threading.Event(),
     'event':       threading.Event(),
+    'need_redraw': threading.Event(),
 }
 lock       = threading.Lock()
 serial_sem = threading.Semaphore(1)   # one serial operation at a time
@@ -205,6 +206,7 @@ def set_status(msg):
     with lock:
         st['status']      = msg
         st['status_time'] = time.monotonic()
+    st['need_redraw'].set()
 
 
 # ── serial reconnect ─────────────────────────────────────────────────────────
@@ -259,7 +261,7 @@ def _do_band(port, enc, force_tune=False):
             set_status(f'tune timeout after {time.monotonic()-t0:.0f}s')
             return
         if not valid_response(f't {enc:02x}', resp):
-            set_status(f'unexpected ATU response')
+            set_status(f'unexpected ATU response: {resp!r}')
             return
         swr = _extract_swr(resp)
         with lock:
@@ -317,9 +319,12 @@ def run_cmd(port, cmd):
 # ── UDP receiver ─────────────────────────────────────────────────────────────
 
 def udp_loop(sock, port):
+    sock.settimeout(1.0)
     while not st['quit'].is_set():
         try:
             d, _ = sock.recvfrom(1024)
+        except socket.timeout:
+            continue
         except OSError:
             time.sleep(0.5)
             continue
@@ -378,23 +383,34 @@ def _dispatch_key(port, ch):
     elif ch == '?':
         threading.Thread(target=run_cmd, args=(port, '?'), daemon=True).start()
     elif ch in ('h', 'H'):
-        set_status('showing help...')
-        sys.stdout.write('\033[2J\033[H' + _HELP + '\npress any key\n')
+        sys.stdout.write('\033[2J\033[H' + _HELP + '\npress any key to return\n')
         sys.stdout.flush()
-        select.select([sys.stdin], [], [])   # wait for any key
+        # wait for a key without blocking the quit path
+        while not st['quit'].is_set():
+            r, _, _ = select.select([sys.stdin], [], [], 0.3)
+            if r:
+                sys.stdin.read(1)
+                break
+        st['need_redraw'].set()
     elif ch == ':':
         with lock:
             st['line_mode'] = True
             st['line_buf']  = ''
+        st['need_redraw'].set()
     elif ch in ('q', 'Q', '\x03', '\x04'):
         st['quit'].set()
 
 
 def _dispatch_line(port, cmd):
     if cmd in ('help', 'h'):
-        sys.stdout.write('\033[2J\033[H' + _HELP + '\npress any key\n')
+        sys.stdout.write('\033[2J\033[H' + _HELP + '\npress any key to return\n')
         sys.stdout.flush()
-        select.select([sys.stdin], [], [])
+        while not st['quit'].is_set():
+            r, _, _ = select.select([sys.stdin], [], [], 0.3)
+            if r:
+                sys.stdin.read(1)
+                break
+        st['need_redraw'].set()
     else:
         threading.Thread(target=run_cmd, args=(port, cmd), daemon=True).start()
 
@@ -422,6 +438,7 @@ def input_loop(port):
                     with lock:
                         st['line_mode'] = False
                         st['line_buf']  = ''
+                    st['need_redraw'].set()
                     if cmd:
                         _dispatch_line(port, cmd)
                 elif ch == '\x1b':
@@ -432,9 +449,11 @@ def input_loop(port):
                 elif ch in ('\x7f', '\x08'):
                     with lock:
                         st['line_buf'] = st['line_buf'][:-1]
+                    st['need_redraw'].set()
                 else:
                     with lock:
                         st['line_buf'] += ch
+                    st['need_redraw'].set()
             else:
                 _dispatch_key(port, ch)
     finally:
@@ -503,7 +522,7 @@ def draw(port):
             band_row += f'{_DIM}{k}·{short}{_RST}  '
 
     if line_mode:
-        controls = f'cmd> {line_buf}'
+        controls = f'cmd> {line_buf}_'
     else:
         controls = f'{_DIM}t tune   r reset   : command   h help   q quit{_RST}'
 
@@ -521,7 +540,8 @@ def draw(port):
 def display_loop(port):
     while not st['quit'].is_set():
         draw(port)
-        time.sleep(1.0)
+        st['need_redraw'].wait(timeout=1.0)
+        st['need_redraw'].clear()
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -541,16 +561,32 @@ def main():
             st['retrying'] = True
         threading.Thread(target=open_serial_retry, args=(port,), daemon=True).start()
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(('', WSJT_PORT))
+    # UDP — optional; script is fully usable without WSJT-X
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass
+        sock.bind(('', WSJT_PORT))
+        set_status(f'listening for WSJT-X on :{WSJT_PORT}')
+    except OSError as e:
+        if sock:
+            sock.close()
+        sock = None
+        set_status(f'ready (WSJT-X UDP unavailable: {e})')
 
-    for target, args in [
-        (udp_loop,     (sock, port)),
+    threads = [
         (event_loop,   (port,)),
         (display_loop, (port,)),
         (input_loop,   (port,)),
-    ]:
+    ]
+    if sock is not None:
+        threads.insert(0, (udp_loop, (sock, port)))
+
+    for target, args in threads:
         threading.Thread(target=target, args=args, daemon=True).start()
 
     print('\033[?25l', end='', flush=True)   # hide cursor
@@ -560,6 +596,8 @@ def main():
         pass
     finally:
         print('\033[?25h\033[2J\033[H')      # restore cursor, clear
+        if sock:
+            sock.close()
 
 
 if __name__ == '__main__':
