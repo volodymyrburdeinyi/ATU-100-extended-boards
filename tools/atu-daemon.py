@@ -185,18 +185,19 @@ def _extract_swr(resp):
 # ── shared state ─────────────────────────────────────────────────────────────
 
 st = {
-    'fd':          None,
-    'enc':         0,
-    'tx':          False,
-    'swr':         0,
-    'status':      'ready — press h for help',
-    'status_time': 0.0,
-    'retrying':    False,
-    'line_mode':   False,
-    'line_buf':    '',
-    'quit':        threading.Event(),
-    'event':       threading.Event(),
-    'need_redraw': threading.Event(),
+    'fd':               None,
+    'enc':              0,
+    'tx':               False,
+    'swr':              0,
+    'status':           'ready — press h for help',
+    'status_time':      0.0,
+    'retrying':         False,
+    'line_mode':        False,
+    'line_buf':         '',
+    'quit':             threading.Event(),
+    'event':            threading.Event(),
+    'need_redraw':      threading.Event(),
+    'pending_tune_enc': 0,   # set when recall hits NOMATCH during TX; tune fires on TX-end
 }
 lock       = threading.Lock()
 serial_sem = threading.Semaphore(1)   # one serial operation at a time
@@ -245,13 +246,22 @@ def _do_band(port, enc, force_tune=False):
         return
     try:
         if not force_tune:
-            set_status(f'checking {bnd} slot...')
+            set_status(f'recalling {bnd}...')
             resp = serial_cmd(fd, f'l {enc:02x}', timeout=3.0)
             if resp is not None and resp.startswith('RECALL'):
                 swr = _extract_swr(resp)
                 with lock:
                     st['swr'] = swr
-                set_status(f'recalled saved {bnd} slot')
+                set_status(f'recalled {bnd}')
+                return
+            # NOMATCH — full tune needed; defer if TX active so we don't
+            # change relays mid-transmission on the QMX+
+            with lock:
+                tx_now = st['tx']
+            if tx_now:
+                with lock:
+                    st['pending_tune_enc'] = enc
+                set_status(f'no {bnd} slot · will tune after TX')
                 return
 
         set_status(f'tuning {bnd}...')
@@ -339,12 +349,14 @@ def udp_loop(sock, port):
             if enc > 0:
                 st['enc'] = enc
             st['tx'] = tx
-        if changed and tx:
-            set_status(f'band → {band(enc)} · waiting for TX to end')
-        if changed and not tx:
+        if changed:
+            # Recall fires immediately regardless of TX — relay pre-positioning
+            # happens before QMX+ SWR protection kicks in.
+            # Full tune (if needed after NOMATCH) is deferred until TX ends.
             st['event'].set()
         if prev_tx and not tx:
-            st['event'].set()   # TX just ended — trigger pending band change
+            # TX just ended — fire pending tune or any deferred band change
+            st['event'].set()
 
 
 # ── event loop (WSJT-X auto) ─────────────────────────────────────────────────
@@ -355,9 +367,18 @@ def event_loop(port):
         if triggered:
             st['event'].clear()
             with lock:
-                enc = st['enc']
-                tx  = st['tx']
-            if not tx and enc:
+                enc     = st['enc']
+                tx      = st['tx']
+                pending = st['pending_tune_enc']
+            # TX just ended: fire deferred tune if one is waiting
+            if not tx and pending:
+                with lock:
+                    st['pending_tune_enc'] = 0
+                threading.Thread(
+                    target=run_band, args=(port, pending, True), daemon=True
+                ).start()
+            elif enc:
+                # Normal band change: try recall (fires immediately, even during TX)
                 threading.Thread(
                     target=run_band, args=(port, enc), daemon=True
                 ).start()
