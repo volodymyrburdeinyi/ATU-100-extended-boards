@@ -14,6 +14,8 @@ int g_i_SWR, g_i_PWR, g_i_P_max, g_i_swr_a;
 static char g_b_rready = 0, g_char_p_cnt = 0;
 
 static char g_b_Overload = 0;
+static char g_b_tx_seen = 0;
+static unsigned char g_char_tune_effort = 0;
 
 static int e_i_Cap1, e_i_Cap2, e_i_Cap3, e_i_Cap4, e_i_Cap5, e_i_Cap6, e_i_Cap7;
 static int e_i_Ind1, e_i_Ind2, e_i_Ind3, e_i_Ind4, e_i_Ind5, e_i_Ind6, e_i_Ind7;
@@ -225,14 +227,22 @@ void get_swr()
       if (g_i_PWR > g_i_P_max)
          g_i_P_max = g_i_PWR;
    }
+   if (g_char_tune_effort < 255) g_char_tune_effort++;
    else
    {
       g_char_p_cnt = 0;
       show_pwr(g_i_P_max, g_i_SWR);
       g_i_P_max = 0;
    }
+   if (g_i_PWR >= e_i_watts_min_for_start)
+      g_b_tx_seen = 1;
    while ((g_i_PWR < e_i_watts_min_for_start) | (g_i_PWR > e_i_watts_max_for_start & e_i_watts_max_for_start > 0))
    { // waiting for good power
+      if (g_b_tx_seen == 1)
+      { // TX was active, power dropped — QMX+ inhibit, abort gracefully
+         g_i_SWR = 0;
+         return;
+      }
       CLRWDT();
       get_pwr();
       if (g_char_p_cnt != 100)
@@ -600,23 +610,97 @@ void sub_tune()
    return;
 }
 
+static void band_slot_save(char l_probe_matched)
+{
+   unsigned char l_ptr, l_base, l_count;
+   if (l_probe_matched) return;
+   if (g_char_tune_effort <= EEPROM_BAND_EFFORT_THR) return;
+   if (g_i_SWR == 0 || g_i_SWR >= 150) return;
+   l_count = eeprom_read(EEPROM_BAND_COUNT);
+   if (l_count < 1 || l_count > EEPROM_BAND_SLOT_COUNT) return;
+   l_ptr = eeprom_read(EEPROM_BAND_PTR);
+   if (l_ptr >= l_count) l_ptr = 0;
+   l_base = EEPROM_BAND_SLOT_0 + (l_ptr << 2u);
+   eeprom_write(l_base,     g_c_ind);
+   eeprom_write(l_base + 1, g_c_cap);
+   eeprom_write(l_base + 2, g_c_SW);
+   eeprom_write(l_base + 3, (char)(g_i_SWR / 10));
+   l_ptr++;
+   if (l_ptr >= l_count) l_ptr = 0;
+   eeprom_write(EEPROM_BAND_PTR, l_ptr);
+}
+
 void tune()
 {
+   char l_tune_ind_mem, l_tune_cap_mem, l_tune_sw_mem;
+   char l_probe_matched = 0;
    CLRWDT();
    //
    g_char_p_cnt = 0;
    g_i_P_max = 0;
+   g_char_tune_effort = 0;
    //
    g_b_rready = 0;
+   g_b_tx_seen = 0;
+   l_tune_ind_mem = g_c_ind;
+   l_tune_cap_mem = g_c_cap;
+   l_tune_sw_mem  = g_c_SW;
    get_swr();
    if (g_i_SWR < 110)
       return;
+   // probe band memory slots before committing to full tune
+   {
+      unsigned char l_slot, l_base, l_slot_ind, l_count;
+      l_count = eeprom_read(EEPROM_BAND_COUNT);
+      if (l_count >= 1 && l_count <= EEPROM_BAND_SLOT_COUNT)
+      {
+         for (l_slot = 0; l_slot < l_count; l_slot++)
+         {
+            l_base = EEPROM_BAND_SLOT_0 + (l_slot << 2u);
+            l_slot_ind = eeprom_read(l_base);
+            if (l_slot_ind == 0xFF)
+               continue;
+            g_c_ind = l_slot_ind;
+            g_c_cap = eeprom_read(l_base + 1);
+            g_c_SW  = eeprom_read(l_base + 2) & 1u;
+            set_ind(g_c_ind);
+            set_cap(g_c_cap);
+            set_sw(g_c_SW);
+            get_swr();
+            if (g_i_SWR == 0)
+            {
+               g_c_ind = l_tune_ind_mem; g_c_cap = l_tune_cap_mem; g_c_SW = l_tune_sw_mem;
+               set_ind(g_c_ind); set_cap(g_c_cap); set_sw(g_c_SW);
+               return;
+            }
+            if (g_i_SWR < 150)
+            {
+               l_probe_matched = 1;
+               return;
+            }
+         }
+         // no slot matched — reset SW before full tune
+         g_c_SW = 0;
+         set_sw(g_c_SW);
+      }
+   }
+   g_char_tune_effort = 0;
    atu_reset();
    if (e_c_b_Loss_ind == 0)
       lcd_ind();
    Delay_ms(50);
    get_swr();
    g_i_swr_a = g_i_SWR;
+   if (g_i_SWR == 0)
+   {
+      g_c_ind = l_tune_ind_mem;
+      g_c_cap = l_tune_cap_mem;
+      g_c_SW  = l_tune_sw_mem;
+      set_ind(g_c_ind);
+      set_cap(g_c_cap);
+      set_sw(g_c_SW);
+      return;
+   }
    if (g_i_SWR < 110)
       return;
    if (e_i_tenths_init_max_swr > 110 & g_i_SWR > e_i_tenths_init_max_swr)
@@ -625,13 +709,24 @@ void tune()
    sub_tune();
    if (g_i_SWR == 0)
    {
-      atu_reset();
+      g_c_ind = l_tune_ind_mem;
+      g_c_cap = l_tune_cap_mem;
+      g_c_SW  = l_tune_sw_mem;
+      set_ind(g_c_ind);
+      set_cap(g_c_cap);
+      set_sw(g_c_SW);
       return;
    }
    if (g_i_SWR < 120)
+   {
+      band_slot_save(l_probe_matched);
       return;
+   }
    if (e_c_num_C_q == 5 & e_c_num_L_q == 5)
+   {
+      band_slot_save(l_probe_matched);
       return;
+   }
 
    if (e_c_num_L_q > 5)
    {
@@ -639,13 +734,36 @@ void tune()
       g_c_L_mult = 1;
       sharp_ind();
    }
-   if (g_i_SWR < 120)
+   if (g_i_SWR == 0)
+   {
+      g_c_ind = l_tune_ind_mem;
+      g_c_cap = l_tune_cap_mem;
+      g_c_SW  = l_tune_sw_mem;
+      set_ind(g_c_ind);
+      set_cap(g_c_cap);
+      set_sw(g_c_SW);
       return;
+   }
+   if (g_i_SWR < 120)
+   {
+      band_slot_save(l_probe_matched);
+      return;
+   }
    if (e_c_num_C_q > 5)
    {
       g_c_step_cap = g_c_C_mult; // = g_c_C_mult
       g_c_C_mult = 1;
       sharp_cap();
+   }
+   if (g_i_SWR == 0)
+   {
+      g_c_ind = l_tune_ind_mem;
+      g_c_cap = l_tune_cap_mem;
+      g_c_SW  = l_tune_sw_mem;
+      set_ind(g_c_ind);
+      set_cap(g_c_cap);
+      set_sw(g_c_SW);
+      return;
    }
    if (e_c_num_L_q == 5)
       g_c_L_mult = 1;
@@ -659,6 +777,7 @@ void tune()
       g_c_C_mult = 2;
    else if (e_c_num_C_q == 7)
       g_c_C_mult = 4;
+   band_slot_save(l_probe_matched);
    CLRWDT();
    return;
 }

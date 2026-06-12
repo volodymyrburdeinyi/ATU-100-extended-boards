@@ -2,19 +2,22 @@
  *
  * Build: gcc -o /tmp/atusim tools/atusim.c -lm && /tmp/atusim
  *
- * The coarse_cap/coarse_tune/sharp_cap/sharp_ind/sub_tune/tune functions below
- * are verbatim copies from main.h. When the firmware algorithm changes, mirror
- * those changes here — they are marked with "VERBATIM: main.h" comments.
+ * The coarse_cap/coarse_tune/sharp_cap/sharp_ind/sub_tune/tune/band_slot_save
+ * functions below are verbatim copies from main.h. When the firmware algorithm
+ * changes, mirror those changes here — they are marked with "VERBATIM: main.h".
  *
  * Scenarios:
  *   S1  bimodal 30m delta loop — global min at high-L must win over local min at low-L
  *   S2  flat/unmatchable       — constant SWR, algorithm must terminate without crash
  *   S3  simple unimodal 20m   — single minimum, algorithm must find it
- *   S4  TX-inhibit mid-scan   — SKIP until Fix 5 is implemented (would hang)
+ *   S4  TX-inhibit mid-scan   — pre-scan position must be restored, no hang
+ *   S5  band memory probe hit  — pre-loaded slot matched, no full tune needed
+ *   S6  band memory slot write — hard tune result saved to EEPROM slot
  */
 
 #include <stdio.h>
 #include <math.h>
+#include <string.h>
 
 /* ── charbits type (from cross_compiler.h) ── */
 typedef union {
@@ -25,6 +28,21 @@ typedef union {
     } bits;
 } charbits;
 
+/* ── EEPROM defines (from cross_compiler.h) ── */
+#define EEPROM_BAND_SLOT_COUNT  8
+#define EEPROM_BAND_EFFORT_THR  20
+#define EEPROM_BAND_COUNT       0x36
+#define EEPROM_BAND_PTR         0x37
+#define EEPROM_BAND_SLOT_0      0x38
+
+/* ── simulated EEPROM ── */
+static unsigned char sim_eeprom[256];
+
+static unsigned char eeprom_read(unsigned char addr)  { return sim_eeprom[addr]; }
+static void eeprom_write(unsigned char addr, unsigned char val) { sim_eeprom[addr] = val; }
+
+static void eeprom_reset(void) { memset(sim_eeprom, 0xFF, sizeof(sim_eeprom)); }
+
 /* ── firmware globals (from main.h) ── */
 static char g_c_ind = 0, g_c_cap = 0;
 static char g_c_SW = 0;
@@ -32,6 +50,8 @@ static char g_c_step_cap = 0, g_c_step_ind = 0;
 static char g_c_L_mult = 4, g_c_C_mult = 4;
 int g_i_SWR = 0, g_i_PWR = 5, g_i_P_max = 0, g_i_swr_a = 0;
 static char g_b_rready = 0, g_char_p_cnt = 0;
+static char g_b_tx_seen = 0;
+static unsigned char g_char_tune_effort = 0;
 static char e_c_b_L_linear = 0, e_c_b_C_linear = 0;
 static char e_c_num_L_q = 7, e_c_num_C_q = 7;
 static int  e_i_watts_min_for_start = 1, e_i_watts_max_for_start = 0;
@@ -73,13 +93,23 @@ static void get_pwr(void) {
     g_i_SWR = current_model ? current_model(g_c_ind, g_c_cap, g_c_SW) : 999;
 }
 
+/* VERBATIM: main.h get_swr() */
 static void get_swr(void) {
     get_pwr();
+    if (g_char_p_cnt != 100)
+    {
+        g_char_p_cnt += 1;
+        if (g_i_PWR > g_i_P_max)
+            g_i_P_max = g_i_PWR;
+    }
+    if (g_char_tune_effort < 255) g_char_tune_effort++;
+    if (g_i_PWR >= e_i_watts_min_for_start)
+        g_b_tx_seen = 1;
     while (g_i_PWR < e_i_watts_min_for_start) {
-        /* TX inhibited. Fix 5 will add tx_seen logic and graceful abort here.
-         * Until then, signal abort via SWR=0 and return immediately.
-         * Scenarios that trigger inhibit (S4+) are skipped. */
-        g_i_SWR = 0;
+        if (g_b_tx_seen == 1) {
+            g_i_SWR = 0;
+            return;
+        }
         return;
     }
 }
@@ -333,34 +363,133 @@ static void sub_tune(void)
     return;
 }
 
+/* VERBATIM: main.h band_slot_save() */
+static void band_slot_save(char l_probe_matched)
+{
+    unsigned char l_ptr, l_base, l_count;
+    if (l_probe_matched) return;
+    if (g_char_tune_effort <= EEPROM_BAND_EFFORT_THR) return;
+    if (g_i_SWR == 0 || g_i_SWR >= 150) return;
+    l_count = eeprom_read(EEPROM_BAND_COUNT);
+    if (l_count < 1 || l_count > EEPROM_BAND_SLOT_COUNT) return;
+    l_ptr = eeprom_read(EEPROM_BAND_PTR);
+    if (l_ptr >= l_count) l_ptr = 0;
+    l_base = EEPROM_BAND_SLOT_0 + (l_ptr << 2u);
+    eeprom_write(l_base,     g_c_ind);
+    eeprom_write(l_base + 1, g_c_cap);
+    eeprom_write(l_base + 2, g_c_SW);
+    eeprom_write(l_base + 3, (char)(g_i_SWR / 10));
+    l_ptr++;
+    if (l_ptr >= l_count) l_ptr = 0;
+    eeprom_write(EEPROM_BAND_PTR, l_ptr);
+}
+
+/* VERBATIM: main.h tune() */
 static void tune(void)
 {
+    char l_tune_ind_mem, l_tune_cap_mem, l_tune_sw_mem;
+    char l_probe_matched = 0;
     CLRWDT();
-    g_char_p_cnt = 0; g_i_P_max = 0; g_b_rready = 0;
+    g_char_p_cnt = 0; g_i_P_max = 0; g_char_tune_effort = 0;
+    g_b_rready = 0; g_b_tx_seen = 0;
+    l_tune_ind_mem = g_c_ind;
+    l_tune_cap_mem = g_c_cap;
+    l_tune_sw_mem  = g_c_SW;
     get_swr();
     if (g_i_SWR < 110) return;
+    // probe band memory slots before committing to full tune
+    {
+        unsigned char l_slot, l_base, l_slot_ind, l_count;
+        l_count = eeprom_read(EEPROM_BAND_COUNT);
+        if (l_count >= 1 && l_count <= EEPROM_BAND_SLOT_COUNT)
+        {
+            for (l_slot = 0; l_slot < l_count; l_slot++)
+            {
+                l_base = EEPROM_BAND_SLOT_0 + (l_slot << 2u);
+                l_slot_ind = eeprom_read(l_base);
+                if (l_slot_ind == 0xFF)
+                    continue;
+                g_c_ind = l_slot_ind;
+                g_c_cap = eeprom_read(l_base + 1);
+                g_c_SW  = eeprom_read(l_base + 2) & 1u;
+                set_ind(g_c_ind);
+                set_cap(g_c_cap);
+                set_sw(g_c_SW);
+                get_swr();
+                if (g_i_SWR == 0)
+                {
+                    g_c_ind = l_tune_ind_mem; g_c_cap = l_tune_cap_mem; g_c_SW = l_tune_sw_mem;
+                    set_ind(g_c_ind); set_cap(g_c_cap); set_sw(g_c_SW);
+                    return;
+                }
+                if (g_i_SWR < 150)
+                {
+                    l_probe_matched = 1;
+                    return;
+                }
+            }
+            g_c_SW = 0;
+            set_sw(g_c_SW);
+        }
+    }
+    g_char_tune_effort = 0;
     atu_reset();
     if (e_c_b_Loss_ind == 0) lcd_ind();
     Delay_ms(50);
     get_swr();
     g_i_swr_a = g_i_SWR;
+    if (g_i_SWR == 0)
+    {
+        g_c_ind = l_tune_ind_mem; g_c_cap = l_tune_cap_mem; g_c_SW = l_tune_sw_mem;
+        set_ind(g_c_ind); set_cap(g_c_cap); set_sw(g_c_SW);
+        return;
+    }
     if (g_i_SWR < 110) return;
     if (e_i_tenths_init_max_swr > 110 & g_i_SWR > e_i_tenths_init_max_swr)
         return;
     sub_tune();
-    if (g_i_SWR == 0) { atu_reset(); return; }
-    if (g_i_SWR < 120) return;
-    if (e_c_num_C_q == 5 & e_c_num_L_q == 5) return;
+    if (g_i_SWR == 0)
+    {
+        g_c_ind = l_tune_ind_mem; g_c_cap = l_tune_cap_mem; g_c_SW = l_tune_sw_mem;
+        set_ind(g_c_ind); set_cap(g_c_cap); set_sw(g_c_SW);
+        return;
+    }
+    if (g_i_SWR < 120)
+    {
+        band_slot_save(l_probe_matched);
+        return;
+    }
+    if (e_c_num_C_q == 5 & e_c_num_L_q == 5)
+    {
+        band_slot_save(l_probe_matched);
+        return;
+    }
     if (e_c_num_L_q > 5) {
         g_c_step_ind = g_c_L_mult;
         g_c_L_mult = 1;
         sharp_ind();
     }
-    if (g_i_SWR < 120) return;
+    if (g_i_SWR == 0)
+    {
+        g_c_ind = l_tune_ind_mem; g_c_cap = l_tune_cap_mem; g_c_SW = l_tune_sw_mem;
+        set_ind(g_c_ind); set_cap(g_c_cap); set_sw(g_c_SW);
+        return;
+    }
+    if (g_i_SWR < 120)
+    {
+        band_slot_save(l_probe_matched);
+        return;
+    }
     if (e_c_num_C_q > 5) {
         g_c_step_cap = g_c_C_mult;
         g_c_C_mult = 1;
         sharp_cap();
+    }
+    if (g_i_SWR == 0)
+    {
+        g_c_ind = l_tune_ind_mem; g_c_cap = l_tune_cap_mem; g_c_SW = l_tune_sw_mem;
+        set_ind(g_c_ind); set_cap(g_c_cap); set_sw(g_c_SW);
+        return;
     }
     if (e_c_num_L_q == 5) g_c_L_mult = 1;
     else if (e_c_num_L_q == 6) g_c_L_mult = 2;
@@ -368,6 +497,7 @@ static void tune(void)
     if (e_c_num_C_q == 5) g_c_C_mult = 1;
     else if (e_c_num_C_q == 6) g_c_C_mult = 2;
     else if (e_c_num_C_q == 7) g_c_C_mult = 4;
+    band_slot_save(l_probe_matched);
     CLRWDT();
     return;
 }
@@ -382,14 +512,8 @@ static void tune(void)
 
 /*
  * S1 model: 41m delta loop on 10.1 MHz (30m band).
- *
- * Two dips in the SWR-vs-inductance curve:
- *   local minimum:  ind≈12 (register), cap≈24 → SWR≈175  — good but not great
- *   global minimum: ind≈96 (register), cap≈32 → SWR≈115  — the real answer
- *
- * The greedy old algorithm stops at the local minimum because the next position
- * (ind=24) is worse. Fix 2b (non-greedy, no else-break) keeps scanning and
- * finds the global minimum at ind=96.
+ * Two dips: local min at low-L (ind≈12,cap≈24,SWR≈175), global min at high-L
+ * (ind≈96,cap≈32,SWR≈115). Non-greedy scan must reach the global minimum.
  */
 static int model_bimodal_30m(unsigned char ind, unsigned char cap, unsigned char sw)
 {
@@ -404,10 +528,8 @@ static int model_bimodal_30m(unsigned char ind, unsigned char cap, unsigned char
 }
 
 /*
- * S2 model: unmatchable antenna (badly resonant load, no L/C combination helps).
- *
- * SWR is constant at 350 regardless of relay position.
- * The algorithm must terminate cleanly — no infinite loop, no crash.
+ * S2 model: unmatchable antenna. SWR constant at 350 everywhere.
+ * Algorithm must terminate cleanly without crash or hang.
  */
 static int model_flat(unsigned char ind, unsigned char cap, unsigned char sw)
 {
@@ -416,10 +538,8 @@ static int model_flat(unsigned char ind, unsigned char cap, unsigned char sw)
 }
 
 /*
- * S3 model: well-behaved dipole on 14.1 MHz (20m band).
- *
- * Single clear minimum at ind=32 (register), cap=24 (register), SW=0.
- * Sanity regression: algorithm must converge to SWR < 120.
+ * S3/S5/S6 model: well-behaved dipole on 14.1 MHz (20m band).
+ * Single minimum at ind=32, cap=24, SW=0, SWR≈105.
  */
 static int model_simple_20m(unsigned char ind, unsigned char cap, unsigned char sw)
 {
@@ -440,21 +560,13 @@ static void reset_state(void)
     g_c_step_cap = 0; g_c_step_ind = 0;
     g_c_L_mult = 4; g_c_C_mult = 4;
     g_i_SWR = 999; g_i_PWR = 5; g_i_P_max = 0; g_i_swr_a = 0;
-    g_char_p_cnt = 0; g_b_rready = 0;
+    g_char_p_cnt = 0; g_char_tune_effort = 0; g_b_rready = 0; g_b_tx_seen = 0;
     sim_call_n = 0; sim_inhibit_on_call = -1;
     e_i_tenths_init_max_swr = 0;
+    eeprom_reset();
 }
 
 typedef struct { char ind; char cap; char sw; int swr; } result_t;
-
-static result_t run_tune(swr_fn model, int inhibit_call)
-{
-    reset_state();
-    current_model = model;
-    sim_inhibit_on_call = inhibit_call;
-    tune();
-    return (result_t){ g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
-}
 
 int main(void)
 {
@@ -463,7 +575,7 @@ int main(void)
 #define CHECK(label, cond, r) do { \
     int _ok = (cond); \
     passed += _ok; total++; \
-    printf("%s  %-46s  ind=%3d cap=%3d sw=%d swr=%d\n", \
+    printf("%s  %-50s  ind=%3d cap=%3d sw=%d swr=%d\n", \
         _ok ? "PASS" : "FAIL", (label), \
         (int)(unsigned char)(r).ind, (int)(unsigned char)(r).cap, \
         (int)(r).sw, (r).swr); \
@@ -471,28 +583,77 @@ int main(void)
 
     /* S1: algorithm must reach the global minimum at high inductance */
     {
-        result_t r = run_tune(model_bimodal_30m, -1);
+        reset_state();
+        current_model = model_bimodal_30m;
+        tune();
+        result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
         CHECK("S1 bimodal 30m — global min at high L",
               r.ind >= 76 && r.swr < 130, r);
     }
 
     /* S2: must terminate cleanly with a valid SWR reading */
     {
-        result_t r = run_tune(model_flat, -1);
+        reset_state();
+        current_model = model_flat;
+        tune();
+        result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
         CHECK("S2 flat unmatchable — terminates, valid SWR",
               r.swr >= 100 && r.swr <= 999, r);
     }
 
     /* S3: must converge to SWR < 120 on a simple well-behaved load */
     {
-        result_t r = run_tune(model_simple_20m, -1);
+        reset_state();
+        current_model = model_simple_20m;
+        tune();
+        result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
         CHECK("S3 simple 20m — converges to SWR < 120",
               r.swr < 130, r);
     }
 
-    /* S4: TX inhibit mid-scan — not yet testable without Fix 5 */
-    printf("SKIP  %-46s  (Fix 5 not implemented — get_swr loop would hang)\n",
-           "S4 TX inhibit mid-scan");
+    /* S4: TX inhibit mid-scan — pre-scan position must be restored */
+    {
+        reset_state();
+        g_c_ind = 40; g_c_cap = 24;
+        current_model = model_simple_20m;
+        sim_inhibit_on_call = 20;
+        tune();
+        result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
+        CHECK("S4 TX inhibit — pre-scan position restored",
+              r.ind == 40 && r.cap == 24, r);
+    }
+
+    /* S5: pre-loaded slot must be found by probe, no full tune */
+    {
+        reset_state();
+        eeprom_write(EEPROM_BAND_COUNT, 8);          /* feature enabled, 8 slots */
+        /* plant a known-good 20m result in slot 0 */
+        eeprom_write(EEPROM_BAND_SLOT_0,     32);   /* ind */
+        eeprom_write(EEPROM_BAND_SLOT_0 + 1, 24);   /* cap */
+        eeprom_write(EEPROM_BAND_SLOT_0 + 2,  0);   /* sw  */
+        eeprom_write(EEPROM_BAND_SLOT_0 + 3, 10);   /* swr/10 */
+        current_model = model_simple_20m;
+        tune();
+        result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
+        /* probe hit: relay positions match slot, SWR < 150 */
+        CHECK("S5 band probe hit — slot recalled, SWR < 150",
+              r.ind == 32 && r.cap == 24 && r.swr < 150, r);
+    }
+
+    /* S6: hard tune result must be written to EEPROM slot */
+    {
+        reset_state();
+        eeprom_write(EEPROM_BAND_COUNT, 8);          /* feature enabled, 8 slots */
+        /* EEPROM slots empty, no pre-loaded positions */
+        current_model = model_bimodal_30m;
+        tune();
+        result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
+        unsigned char saved_ind = eeprom_read(EEPROM_BAND_SLOT_0);
+        unsigned char saved_ptr = eeprom_read(EEPROM_BAND_PTR);
+        /* slot 0 written with tune result, pointer advanced to 1 */
+        CHECK("S6 hard tune — result saved to EEPROM slot 0",
+              saved_ind == (unsigned char)r.ind && saved_ptr == 1 && r.swr < 130, r);
+    }
 
     printf("\n%d/%d passed\n", passed, total);
     return (passed == total) ? 0 : 1;

@@ -57,6 +57,22 @@ else
   echo "PASS  Fix 2b: coarse_tune() non-greedy with min_swr = 9999"
 fi
 
+# Band memory: band_slot_save() must use unsigned char for ptr/base to avoid signed wrap corrupting settings area
+if ! awk '/static void band_slot_save/,/^}/' "$MAIN_H" 2>/dev/null | grep -q 'unsigned char l_ptr, l_base'; then
+  echo "FAIL  Band memory: band_slot_save() uses signed char for l_ptr/l_base — will corrupt EEPROM on first run"
+  FAIL=1
+else
+  echo "PASS  Band memory: band_slot_save() uses unsigned char for ptr/base"
+fi
+
+# Band memory: probe loop in tune() must use unsigned char for l_slot_ind — signed char makes 0xFF sentinel check always false
+if ! awk '/\/\/ probe band memory slots/,/no slot matched/' "$MAIN_H" 2>/dev/null | grep -q 'unsigned char l_slot, l_base, l_slot_ind'; then
+  echo "FAIL  Band memory: probe loop uses signed char l_slot_ind — fresh EEPROM slots never skipped"
+  FAIL=1
+else
+  echo "PASS  Band memory: probe loop uses unsigned char for slot locals"
+fi
+
 # Fix 3: sub_tune() SW-revert block must call get_swr(), not assign g_i_SWR = l_int_swr_mem
 if grep -q 'g_i_SWR = l_int_swr_mem' "$MAIN_H" 2>/dev/null; then
   echo "FAIL  Fix 3: sub_tune() still uses g_i_SWR = l_int_swr_mem (stale assignment)"

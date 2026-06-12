@@ -59,6 +59,14 @@ extern "C"
 #define EEPROM_LAST_SWR_H 252
 #define EEPROM_LAST_SWR_L 251
 
+/* band memory: config byte + circular pointer + 8 slots x 4 bytes (ind, cap, sw, swr/10) */
+/* EEPROM_BAND_COUNT: 0 = feature off, 1-8 = number of active slots */
+#define EEPROM_BAND_SLOT_COUNT  8
+#define EEPROM_BAND_EFFORT_THR  20
+#define EEPROM_BAND_COUNT       0x36
+#define EEPROM_BAND_PTR         0x37
+#define EEPROM_BAND_SLOT_0      0x38
+
 #define EEPROM_DISABLE_RELAYS 0x35
 #define EEPROM_FEEDER_LOSS 0x34
 #define EEPROM_ADDITIONAL_INDICATION 0x33

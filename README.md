@@ -1,102 +1,34 @@
-# The latest firmware version is 3.2
+# ATU-100 EXT board firmware — WA1RCT XC8 port, bug fixes and band memory
 
-### New in the version 3.2 
+Fork of the [N7DDC ATU-100](https://github.com/Dfinitski/N7DDC-ATU-100-mini-and-extended-boards) project.
 
-1) Fixed bug with continuous data transfer to the display.
-2) Added new feature to disable all relays along with the timer display. New cell 35(33 for mini board) - 01 to activate the relay off function.
-     Display Off Timer setup - cell 32 (30 for mini board).
-     You can use this feature in your QRP setup where power consumption is critical.
-3) Timeout for display reset increased to 2 seconds. This is required for some OLED displays with a very long RC chain on the reset pin.
+**Compatible with the N7DDC ATU-100 extended board** (PIC16F1938, 7×7 L/C elements).
 
-### New in the version 3.1 
+## What this fork adds
 
-The fider loss value now is zero by default, the tuner board shows mismatch loss only. 
-To install your actual fider loss, power on the board with pushed TUNE button, use BYP and AUTO buttons to set needed value.
-The value will be saved immediatelly in the long-term memory (0x34 cell for extended board or 0x32 cell for mini boards).
+### Bug fixes
 
-Some errors were fixed.
+- **Fix 1** — `lcd_swr()` used global `g_i_SWR` instead of the function parameter; display showed wrong SWR after certain tune sequences.
+- **Fix 2a/2b** — Greedy `else break` in `coarse_cap()` and `coarse_tune()` caused the algorithm to stop at a local SWR minimum. Removed; algorithm now scans the full range and keeps the global best.
+- **Fix 3** — After SW-relay experiment in `sub_tune()`, SWR was read from a stale variable instead of re-measured. Now calls `get_swr()` after reverting SW.
+- **Fix 5** — On rigs that inhibit TX when SWR exceeds a threshold (e.g. QMX+), `get_swr()` would deadlock waiting for power that never returns. A `g_b_tx_seen` flag distinguishes normal RX-wait from TX-inhibit; on inhibit, tune aborts cleanly and restores the pre-scan relay position.
 
-Overload indication is fixed. It works when the input power exceeds the board possibility to meassure correct power.
+### Band memory
 
+8 EEPROM slots store previously found L/C/SW positions. At the start of each tune, all saved slots are probed before committing to a full scan. If a slot matches (SWR < 1.5:1), tuning is instant — no frequency counter or CAT interface required. Hard-won tune results are saved automatically (configurable effort threshold).
 
-## How to rebuild a 100 Watt board to reliable work with QRP 1 - 5 Watt power, by ik3ssg (VIDEO)
+## Build
 
-[![](https://img.youtube.com/vi/dPys_-_wPcQ/0.jpg)](https://www.youtube.com/watch?v=dPys_-_wPcQ)
+Open `ATU_100_EXT_board/FirmWare_PIC16F1938/1938_EXT_MPLAB_sources_V_3.2/` in MPLAB X with XC8.
 
-### New in the version 3.0
-Added the ability to turn off the display backlight by timer and indication of the power delivered to the antenna and the transmitter efficiency.
-These sells were added in 3.0 firmware for EXT board :
+## Algorithm regression tests
 
-31 - cell for setting a ratio of turns of the tandem match on which depends the upper limit of the measured power. The default value is 10, which corresponds to a maximum measured power of about 150 watts.
- To be able to measure power up to 1500 watts, you should use the high power indication mode and a tandem match with a ratio of 1 to 32.
-   If the power does not exceed 40 watts, it makes sense to use a tandem-match with a ratio of 1: 5 turns, which will allow to work better with a minimum power of 1-5 watts.
-    For other power values, the ratio of turns should be calculated so that the voltage at the measuring inputs of the microprocessor at maximum power does not exceed 4.096 Volts for the PIC16F1938 processor and 5.0 Volts for the PIC18F2520 processor.
-    
-32 – sell for setting the time of glow dysplay or its backlite, in seconds .
-The backlite is glowing whilw press any buttons and if RF power comes to input.П
-By default it is disabled, value 00.
+```bash
+gcc -o /tmp/atusim tools/atusim.c -lm && /tmp/atusim
+```
 
-33 — cell for setting of an addidional indication mode, 
-value 00 — for indicating L and C only. 
-Value 01 — for indicating the power delivered to the antenna and efficiency of fider and transmitter пwhen input power is enough for correct SWR meassuring. By default is enable, value 01.
+Run before flashing. The pre-commit hook runs this automatically.
 
-Warning!!! The device does not take into account  its own efficiency.
+## Original project
 
-34 — cell for setting a feeder power loss ratio, the first number — integer part of decibell, second number — ten’s parts of decibell. Velue by default — 1.2 (12 writen in the cell). this value uses for counting the power delivered to antenna. The loss value can be found in the reference data for the used cable or you can measure the exact value yourself.
-If it is not necessary to take into account feeder losses, the value 00 should be written into the cell, then the calculations will correspond only to the mismatch losses.
-
-For mini board :
-0A - cell for setting a ratio of turns of the tandem match on which depends the 
-upper limit of the measured power . The default value is 10, which corresponds to a 
-maximum measured power of about 150 watts.
-  If the power does not exceed 40 watts, it makes sense to use a tandem-match with 
-a ratio of 1:5 turns, which will allow to work better with a minimum power of 1 -5 
-watts.
-For other power values, the ratio of turns should be calculated so that the voltage 
-at the measuring inputs of the microprocessor at maximum power does not exceed 
-4.096 Volts for the PIC16F1938 processor and 5.0 Volts for the PIC18F2520 
-processor.
-
-
-
-# N7DDC ATU-100 mini board
-
-## The easy DIY 5x5 elements 100 Watt automatic antenna tuner 
-
-![screenshot](http://www.sdr-deluxe.com/downloads/ATU-100_mini/mini_1.jpg)
-
-![screenshot](http://www.sdr-deluxe.com/downloads/ATU-100_mini/mini_2.jpg)
-
-# N7DDC ATU-100 extended board
----
-## The flexible tunable firmware for ATU from 5x5 to 7x7 elements, up to 1500 Watt measured power
-
-### The autor's 7x7 elements 100 Watt version
-
-![screenshot](http://www.sdr-deluxe.com/downloads/ATU-100_mini/ext_1.jpg)
-
-![screenshot](http://www.sdr-deluxe.com/downloads/ATU-100_mini/ext_2.jpg)
-
-# 3D printed housing for 0.91" OLED display, 3 buttons and TNC RF connectors
-
-![screenshot](http://www.sdr-deluxe.com/downloads/ATU-100_mini/case_1.jpg)
-
-![screenshot](http://www.sdr-deluxe.com/downloads/ATU-100_mini/case_2.jpg)
-
-![screenshot](http://www.sdr-deluxe.com/downloads/ATU-100_mini/case_3.jpg)
-
-## AS example 1000 Watt ATU designed by EU2AV (VIDEO)
-
-[![ALT-ТЕКСТ ИЗОБРАЖЕНИЯ](https://img.youtube.com/vi/sg7_t37SJJg/hqdefault.jpg)](https://www.youtube.com/watch?v=sg7_t37SJJg)
-
-## ATU-100 7x7 demo with M0NKA transceiver in Auto mode, LZ2GX (VIDEO)
-
-[![](https://i.ytimg.com/vi/YCMcanrXEcg/hqdefault.jpg?sqp=-oaymwEZCNACELwBSFXyq4qpAwsIARUAAIhCGAFwAQ==&rs=AOn4CLDr-2GBRi98De-Rub75mheciUqw6g)](https://www.youtube.com/watch?v=YCMcanrXEcg&t)
-
-## ATU-100 5x5 Auto mode with FTdx-1200 (VIDEO)
-
-[![](https://i.ytimg.com/vi/O6UJ5CSuX3I/hqdefault.jpg?sqp=-oaymwEZCNACELwBSFXyq4qpAwsIARUAAIhCGAFwAQ==&rs=AOn4CLC7vJC2mMtkhjwbAYqz1A_gWNuLtA)](https://www.youtube.com/watch?v=O6UJ5CSuX3I)
-
-## The first video from N7DDC, 5x5 elements, ENGLISH subtitles (VIDEO)
-
-[![](https://i.ytimg.com/vi/zBjliED9-OE/hqdefault.jpg?sqp=-oaymwEZCNACELwBSFXyq4qpAwsIARUAAIhCGAFwAQ==&rs=AOn4CLCmnk9ChmyDpkg_l3T91twONpX8vw)](https://www.youtube.com/watch?v=zBjliED9-OE&t)
+[N7DDC ATU-100 mini and extended boards](https://github.com/Dfinitski/N7DDC-ATU-100-mini-and-extended-boards) by David Fainitski N7DDC, XC8 port by WA1RCT.
