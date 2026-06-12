@@ -813,7 +813,7 @@ void tune()
       g_c_C_mult = 2;
    else if (e_c_num_C_q == 7)
       g_c_C_mult = 4;
-   band_slot_save(l_probe_matched);
+   band_slot_save(l_probe_matched, l_freq);
    CLRWDT();
    return;
 }
