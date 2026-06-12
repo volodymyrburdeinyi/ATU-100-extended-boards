@@ -12,21 +12,21 @@ Fork of the [N7DDC ATU-100](https://github.com/Dfinitski/N7DDC-ATU-100-mini-and-
 
 | Address | Name | Default | Notes |
 |---------|------|---------|-------|
-| 0x00 | Display I²C address | 0x3C | SSD1306 |
-| 0x01 | Display type | 0 | 0=SSD1306, 1=SH1106 |
+| 0x00 | Display I²C address | 0x78 | 0x3C shifted left (8-bit form) |
+| 0x01 | Display type | 5 | |
 | 0x02 | Automatic mode | 1 | 1=on |
-| 0x03 | Timeout (×100 ms) | 100 | 10 s |
-| 0x04 | SWR tune threshold (×10) | 15 | 1.5:1 |
+| 0x03 | Timeout (×100 ms) | 21 | 2.1 s |
+| 0x04 | SWR tune threshold (×10) | 19 | 1.9:1 |
 | 0x05 | Min power to start (W) | 1 | |
-| 0x06 | Max power (W) | 120 | |
+| 0x06 | Max power (W) | 0 | |
 | 0x07 | Display offset down | 0 | |
-| 0x08 | Display offset left | 0 | |
-| 0x09 | Max SWR to begin tune | 30 | 3.0:1 |
+| 0x08 | Display offset left | 2 | |
+| 0x09 | Max SWR to begin tune | 0 | |
 | 0x0A | Number of inductors | 7 | |
 | 0x0B | Inductor step (linear) | 0 | 0=log |
 | 0x0C | Number of capacitors | 7 | |
 | 0x0D | Capacitor step (linear) | 0 | 0=log |
-| 0x0E | Enable nonlinear diode | 0 | |
+| 0x0E | Enable nonlinear diode | 1 | |
 | 0x0F | Inverse inductance relay | 0 | |
 
 ### Relay tables (0x10–0x2F)
@@ -38,10 +38,10 @@ Inductor and capacitor relay bitmaps written by `cells_init()`. Values depend on
 | Address | Name | Default | Notes |
 |---------|------|---------|-------|
 | 0x30 | Power measure level | 0 | |
-| 0x31 | Tandem match | 0 | |
+| 0x31 | Tandem match | 16 | |
 | 0x32 | Display off timer | 0 | |
-| 0x33 | Additional indication | 0 | |
-| 0x34 | Feeder loss (dB×10) | 0 | |
+| 0x33 | Additional indication (feeder loss display) | 0 | 1=on |
+| 0x34 | Feeder loss (tenths dB, BCD) | 0 | |
 | 0x35 | Disable relays | 0 | |
 
 ### Band memory (0x36–0x57)
