@@ -46,7 +46,7 @@ __eeprom unsigned char initial_eeprom[256] = {
     0x00,0x50,0x01,0x10,0x02,0x20,0x04,0x50,0x10,0x00,0x22,0x00,0x45,0x00,0xff,0xff,
     0x00,0x10,0x00,0x22,0x00,0x47,0x01,0x00,0x02,0x20,0x04,0x70,0x10,0x00,0xff,0xff,
     0x00,0x10,0x00,0x00,0x00,0x00,0x08,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
-    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0x01,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
     0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
     0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
     0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
@@ -60,8 +60,7 @@ __eeprom unsigned char initial_eeprom[256] = {
     0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x00,0x00,0x01,0x00,0x00,
 };
 
-//void interrupt () {
-//}
+/* ISR is in uart.c when UART is defined */
 
 void main()
 {
@@ -285,6 +284,9 @@ void main()
          button_proc();
       else
          button_proc_test();
+#ifdef UART
+      uart_cmd_proc();
+#endif
       //
       if (g_i_dysp_delay_counter != 0)
          g_i_dysp_delay_counter--;
@@ -1341,6 +1343,12 @@ void cells_init(void)
    e_c_b_Loss_ind = eeprom_read(EEPROM_ADDITIONAL_INDICATION);
    e_c_tenths_Fid_loss = Bcd2Dec(eeprom_read(EEPROM_FEEDER_LOSS));
    e_c_b_Relay_off = Bcd2Dec(eeprom_read(EEPROM_DISABLE_RELAYS));
+   /* guard against old 4-byte slot format after firmware upgrade without EEPROM reprogram */
+   if (eeprom_read(EEPROM_FORMAT_VERSION) != 0x01)
+   {
+      eeprom_write(EEPROM_BAND_COUNT, 0);
+      eeprom_write(EEPROM_FORMAT_VERSION, 0x01);
+   }
    CLRWDT();
    return;
 }
@@ -1361,4 +1369,180 @@ void show_loss(void)
    return;
 }
 
-//
+#ifdef UART
+
+unsigned char g_c_uart_freq_hint = 0;
+
+static void uart_putuint(int v)
+{
+    char l_s[7];
+    unsigned char l_i = 0;
+    IntToStr(v, l_s);
+    while (l_i < 5u && l_s[l_i] == ' ') l_i++;
+    uart_puts(l_s + l_i);
+}
+
+static void uart_puthex8(unsigned char v)
+{
+    const char l_hex[] = "0123456789abcdef";
+    uart_tx_bit_bang(l_hex[(v >> 4) & 0x0f]);
+    uart_tx_bit_bang(l_hex[v & 0x0f]);
+}
+
+static void uart_send_status(void)
+{
+    uart_puts("IND=");   uart_putuint(g_c_ind);
+    uart_puts(" CAP=");  uart_putuint(g_c_cap);
+    uart_puts(" SW=");   uart_putuint(g_c_SW);
+    uart_puts(" SWR=");  uart_putuint(g_i_SWR);
+    uart_puts(" AUTO="); uart_putuint(g_b_Auto_mode);
+    uart_puts(" SLOTS=");uart_putuint(eeprom_read(EEPROM_BAND_COUNT));
+    uart_puts("\r\n");
+}
+
+static unsigned char parse_hex8(const char *s)
+{
+    unsigned char l_hi, l_lo;
+    if (s[0] >= '0' && s[0] <= '9')      l_hi = (unsigned char)(s[0] - '0');
+    else if (s[0] >= 'a' && s[0] <= 'f') l_hi = (unsigned char)(s[0] - 'a' + 10u);
+    else if (s[0] >= 'A' && s[0] <= 'F') l_hi = (unsigned char)(s[0] - 'A' + 10u);
+    else return 0;
+    if (s[1] >= '0' && s[1] <= '9')      l_lo = (unsigned char)(s[1] - '0');
+    else if (s[1] >= 'a' && s[1] <= 'f') l_lo = (unsigned char)(s[1] - 'a' + 10u);
+    else if (s[1] >= 'A' && s[1] <= 'F') l_lo = (unsigned char)(s[1] - 'A' + 10u);
+    else return 0;
+    return (unsigned char)((l_hi << 4) | l_lo);
+}
+
+/* Find a freq-tagged slot within EEPROM_BAND_FREQ_TOL of l_freq.
+   If found: apply relays, measure SWR.
+   Returns  1 if SWR < 150 (match good).
+   Returns  0 if no matching slot.
+   Returns -1 if SWR == 0 (TX absent — relays left at last-tried position, caller restores). */
+static signed char band_slot_apply_freq(unsigned char l_freq)
+{
+    unsigned char l_slot, l_base, l_slot_ind, l_count, l_slot_freq, l_diff;
+    if (l_freq == 0) return 0;
+    l_count = eeprom_read(EEPROM_BAND_COUNT);
+    if (l_count < 1 || l_count > EEPROM_BAND_SLOT_COUNT) return 0;
+    for (l_slot = 0; l_slot < l_count; l_slot++) {
+        l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_slot * EEPROM_BAND_SLOT_STRIDE);
+        l_slot_ind = eeprom_read(l_base + 1);
+        if (l_slot_ind == 0xFF) continue;
+        l_slot_freq = eeprom_read(l_base);
+        if (l_slot_freq == 0) continue;
+        l_diff = (l_slot_freq > l_freq) ? (unsigned char)(l_slot_freq - l_freq)
+                                        : (unsigned char)(l_freq - l_slot_freq);
+        if (l_diff > EEPROM_BAND_FREQ_TOL) continue;
+        g_c_ind = l_slot_ind;
+        g_c_cap = eeprom_read(l_base + 2);
+        g_c_SW  = (char)(eeprom_read(l_base + 3) & 1u);
+        set_ind(g_c_ind);
+        set_cap(g_c_cap);
+        set_sw(g_c_SW);
+        get_swr();
+        if (g_i_SWR == 0) return -1;
+        if (g_i_SWR < 150) return 1;
+    }
+    return 0;
+}
+
+static void uart_exec_cmd(const char *l_cmd, unsigned char l_len)
+{
+    if (l_cmd[0] == 't') {
+        if (l_len >= 4u) g_c_uart_freq_hint = parse_hex8(l_cmd + 2);
+        tune();
+        uart_send_status();
+    } else if (l_cmd[0] == 'l' && l_len >= 4u) {
+        /* "l HH" — recall slot by freq_enc, apply relays, report result */
+        unsigned char l_freq = parse_hex8(l_cmd + 2);
+        char l_save_ind = g_c_ind, l_save_cap = g_c_cap, l_save_sw = g_c_SW;
+        signed char l_result = band_slot_apply_freq(l_freq);
+        if (l_result == 1) {
+            uart_puts("RECALL IND="); uart_putuint(g_c_ind);
+            uart_puts(" CAP=");       uart_putuint(g_c_cap);
+            uart_puts(" SW=");        uart_putuint(g_c_SW);
+            uart_puts(" SWR=");       uart_putuint(g_i_SWR);
+            uart_puts("\r\n");
+        } else if (l_result == 0) {
+            uart_puts("NOMATCH\r\n");
+        } else {
+            g_c_ind = l_save_ind; g_c_cap = l_save_cap; g_c_SW = l_save_sw;
+            set_ind(g_c_ind); set_cap(g_c_cap); set_sw(g_c_SW);
+            uart_puts("ERR ABORT\r\n");
+        }
+    } else if (l_cmd[0] == 'm') {
+        /* "m" — dump all band slots */
+        unsigned char l_slot, l_base, l_ind, l_count;
+        l_count = eeprom_read(EEPROM_BAND_COUNT);
+        if (l_count < 1 || l_count > EEPROM_BAND_SLOT_COUNT) {
+            uart_puts("SLOTS=0\r\n");
+        } else {
+            for (l_slot = 0; l_slot < l_count; l_slot++) {
+                l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_slot * EEPROM_BAND_SLOT_STRIDE);
+                l_ind = eeprom_read(l_base + 1);
+                uart_puts("SLOT "); uart_putuint(l_slot);
+                if (l_ind == 0xFF) {
+                    uart_puts(" EMPTY\r\n");
+                } else {
+                    uart_puts(" FREQ=0x"); uart_puthex8(eeprom_read(l_base));
+                    uart_puts(" IND=");    uart_putuint(l_ind);
+                    uart_puts(" CAP=");    uart_putuint(eeprom_read(l_base + 2));
+                    uart_puts(" SW=");     uart_putuint(eeprom_read(l_base + 3) & 1u);
+                    uart_puts(" SWR=");    uart_putuint((int)eeprom_read(l_base + 4) * 10);
+                    uart_puts("\r\n");
+                }
+            }
+        }
+    } else if (l_cmd[0] == 'e' && l_len >= 4u) {
+        /* "e HH" — read one EEPROM cell */
+        unsigned char l_addr = parse_hex8(l_cmd + 2);
+        uart_puts("EEPROM[0x"); uart_puthex8(l_addr);
+        uart_puts("]=0x");      uart_puthex8(eeprom_read(l_addr));
+        uart_puts("\r\n");
+    } else if (l_cmd[0] == 'a') {
+        g_b_Auto_mode = g_b_Auto_mode ? 0 : 1;
+        eeprom_write(EEPROM_AUTOMATIC_MODE, g_b_Auto_mode);
+        uart_puts("OK AUTO=");
+        uart_putuint(g_b_Auto_mode);
+        uart_puts("\r\n");
+    } else if (l_cmd[0] == 'r') {
+        atu_reset();
+        uart_puts("OK RESET\r\n");
+    } else if (l_cmd[0] == 'c' && l_len >= 7u) {
+        /* "c HH VV" — write EEPROM cell, e.g. "c 36 08"               */
+        unsigned char l_addr = parse_hex8(l_cmd + 2);
+        unsigned char l_val  = parse_hex8(l_cmd + 5);
+        eeprom_write(l_addr, l_val);
+        uart_puts("OK EEPROM[0x"); uart_puthex8(l_addr);
+        uart_puts("]=0x");         uart_puthex8(l_val);
+        uart_puts("\r\n");
+    } else if (l_cmd[0] == '?') {
+        uart_send_status();
+    } else {
+        uart_puts("ERR\r\n");
+    }
+}
+
+void uart_cmd_proc(void)
+{
+    static char l_buf[12];
+    static unsigned char l_len = 0;
+    unsigned char l_c;
+
+    while (uart_rx_avail()) {
+        l_c = uart_rx_getc();
+        if (l_c == '\r' || l_c == '\n') {
+            if (l_len > 0u) {
+                l_buf[l_len] = '\0';
+                uart_exec_cmd(l_buf, l_len);
+                l_len = 0;
+            }
+        } else if (l_len < 11u) {
+            l_buf[l_len++] = (char)l_c;
+        }
+    }
+}
+
+#endif /* UART */
+

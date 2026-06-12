@@ -59,13 +59,18 @@ extern "C"
 #define EEPROM_LAST_SWR_H 252
 #define EEPROM_LAST_SWR_L 251
 
-/* band memory: config byte + circular pointer + 8 slots x 4 bytes (ind, cap, sw, swr/10) */
-/* EEPROM_BAND_COUNT: 0 = feature off, 1-8 = number of active slots */
+/* band memory: config byte + circular pointer + N slots x 5 bytes (freq_enc, ind, cap, sw, swr/10) */
+/* EEPROM_BAND_COUNT: 0 = feature off, 1-EEPROM_BAND_SLOT_COUNT = number of active slots           */
+/* EEPROM_FORMAT_VERSION follows immediately after the slot area; moves automatically with count    */
+/* Max safe slot count: (0xFB - 0x38) / 5 = 38. Practical limit: 9 HF bands = 12 slots           */
 #define EEPROM_BAND_SLOT_COUNT  8
 #define EEPROM_BAND_EFFORT_THR  20
 #define EEPROM_BAND_COUNT       0x36
 #define EEPROM_BAND_PTR         0x37
 #define EEPROM_BAND_SLOT_0      0x38
+#define EEPROM_BAND_SLOT_STRIDE 5
+#define EEPROM_BAND_FREQ_TOL    2
+#define EEPROM_FORMAT_VERSION   (EEPROM_BAND_SLOT_0 + EEPROM_BAND_SLOT_COUNT * EEPROM_BAND_SLOT_STRIDE)
 
 #define EEPROM_DISABLE_RELAYS 0x35
 #define EEPROM_FEEDER_LOSS 0x34
@@ -188,6 +193,16 @@ void debugprint(void);
 
     void ADC_Init(void);
 
+#ifdef UART
+    unsigned char uart_rx_avail(void);
+    unsigned char uart_rx_getc(void);
+    void uart_puts(const char *s);
+    void uart_tx_bit_bang(unsigned char val);
+    void uart_cmd_proc(void);
+    /* freq hint injected by "t HH" command; consumed once by tune() */
+    extern unsigned char g_c_uart_freq_hint;
+#endif
+
     void IntToStr(int number, char *output);
 
     /*  forward references*/
@@ -196,7 +211,7 @@ void debugprint(void);
 
 //  uncomment out the next line if you want to have a uart output the
 //  displayed strings
-//////#define UART
+#define UART
 
 //  the posstr is the position.  
 //   the thousands digit is the row, the 3 ls digits is the column
@@ -215,6 +230,10 @@ void uart_wr_str(char posstr[],char str[], char leng);
 //  uncomment out the next line to move the LED I2C to A6 and A7
 //////#define WA1RCT
     
+/* UART RX pin: RB2 (bypass-button pin, input, pull-up already enabled).
+   Physical buttons unused in remote/unattended operation.               */
+#define UART_RX_PIN PORTBbits.RB2
+
 #ifdef WA1RCT
 
 #define UART_OUT_PIN PORTB_AUTO_BUTTON
@@ -235,7 +254,7 @@ void uart_wr_str(char posstr[],char str[], char leng);
 #else
 //  else, NORMAL
 
-#define UART_OUT_PIN LATAbits.LATA7
+#define UART_OUT_PIN LATBbits.LATB1
 
 #ifdef UART
 //  this effectively disables n_Tx, p_Tx, Green_led and Red_led

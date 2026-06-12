@@ -37,15 +37,35 @@ void pic_init(void)
   //  If we are using the bypass button for an output for uart
   //  set B1 (auto) to an output
 #ifdef UART
-  
+
 #ifdef WA1RCT
   TRISB = 0b00000101;
 #else
-  TRISB = 0b00000111;  
+  TRISB = 0b00000101;   /* RB0=in RB1=out(TX) RB2=in(RX) RB3..RB7=out */
 #endif
-  
+  UART_OUT_PIN = 1;     /* idle TX line high before any transmission    */
+
+  /* Timer0: internal clock, 1:4 prescaler → 1 µs/tick at 16 MHz CPU.
+     Used for UART bit-bang RX timing (104 ticks per bit at 9600 baud).
+     TMR0IE is left disabled here; uart.c ISR enables it on start-bit.  */
+  OPTION_REGbits.T0CS = 0;    /* internal clock source                  */
+  OPTION_REGbits.T0SE = 0;    /* increment on low-to-high (unused)      */
+  OPTION_REGbits.PSA  = 0;    /* prescaler assigned to Timer0           */
+  OPTION_REGbits.PS2  = 0;    /* PS = 001 = 1:4 prescaler               */
+  OPTION_REGbits.PS1  = 0;
+  OPTION_REGbits.PS0  = 1;
+  TMR0 = 0;
+  INTCONbits.TMR0IF = 0;
+  INTCONbits.TMR0IE = 0;
+
+  /* IOC on RB2: falling edge detects UART start bit.
+     PIC16F1938 uses IOCBN/IOCBP registers for edge selection.          */
+  IOCBNbits.IOCBN2 = 1;    /* falling edge on RB2                       */
+  IOCBPbits.IOCBP2 = 0;    /* no rising edge on RB2                     */
+  INTCONbits.IOCIE = 1;    /* IOC interrupt enable (same as RBIE)       */
+
 #else
-  TRISB = 0b00000111;  
+  TRISB = 0b00000111;
 #endif
   TRISC = 0b00000000; //
   //
@@ -69,7 +89,11 @@ void pic_init(void)
   WPUBbits.WPUB1 = 1; // PORTB1 Pull-up resistor
   WPUBbits.WPUB2 = 1; // PORTB2 Pull-up resistor
   //interrupt setting
+#ifdef UART
+  INTCONbits.GIE = 1;
+#else
   INTCONbits.GIE = 0;
+#endif
 /****************************************************************/
 #else
   CLRWDT();

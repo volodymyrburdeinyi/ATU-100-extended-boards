@@ -610,7 +610,11 @@ void sub_tune()
    return;
 }
 
-static void band_slot_save(char l_probe_matched)
+static unsigned char measure_freq(void) {
+   return 0;   /* replaced when 74HC4060 hardware is wired to RD0 */
+}
+
+static void band_slot_save(char l_probe_matched, unsigned char l_freq)
 {
    unsigned char l_ptr, l_base, l_count;
    if (l_probe_matched) return;
@@ -620,11 +624,12 @@ static void band_slot_save(char l_probe_matched)
    if (l_count < 1 || l_count > EEPROM_BAND_SLOT_COUNT) return;
    l_ptr = eeprom_read(EEPROM_BAND_PTR);
    if (l_ptr >= l_count) l_ptr = 0;
-   l_base = EEPROM_BAND_SLOT_0 + (l_ptr << 2u);
-   eeprom_write(l_base,     g_c_ind);
-   eeprom_write(l_base + 1, g_c_cap);
-   eeprom_write(l_base + 2, g_c_SW);
-   eeprom_write(l_base + 3, (char)(g_i_SWR / 10));
+   l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_ptr * EEPROM_BAND_SLOT_STRIDE);
+   eeprom_write(l_base,     l_freq);
+   eeprom_write(l_base + 1, g_c_ind);
+   eeprom_write(l_base + 2, g_c_cap);
+   eeprom_write(l_base + 3, (unsigned char)(g_c_SW & 1u));
+   eeprom_write(l_base + 4, (char)(g_i_SWR / 10));
    l_ptr++;
    if (l_ptr >= l_count) l_ptr = 0;
    eeprom_write(EEPROM_BAND_PTR, l_ptr);
@@ -633,6 +638,7 @@ static void band_slot_save(char l_probe_matched)
 void tune()
 {
    char l_tune_ind_mem, l_tune_cap_mem, l_tune_sw_mem;
+   unsigned char l_freq;
    char l_probe_matched = 0;
    CLRWDT();
    //
@@ -648,35 +654,65 @@ void tune()
    get_swr();
    if (g_i_SWR < 110)
       return;
+   l_freq = measure_freq();
+#ifdef UART
+   if (l_freq == 0 && g_c_uart_freq_hint != 0) { l_freq = g_c_uart_freq_hint; g_c_uart_freq_hint = 0; }
+#endif
    // probe band memory slots before committing to full tune
+   // Phase A (when l_freq > 0): try freq-tagged slots within EEPROM_BAND_FREQ_TOL
+   // Phase B: try untagged slots; skip freq-tagged slots already covered by Phase A
    {
       unsigned char l_slot, l_base, l_slot_ind, l_count;
+      unsigned char l_phase, l_slot_freq, l_diff;
       l_count = eeprom_read(EEPROM_BAND_COUNT);
       if (l_count >= 1 && l_count <= EEPROM_BAND_SLOT_COUNT)
       {
-         for (l_slot = 0; l_slot < l_count; l_slot++)
+         for (l_phase = (l_freq > 0) ? 0u : 1u; l_phase <= 1u; l_phase++)
          {
-            l_base = EEPROM_BAND_SLOT_0 + (l_slot << 2u);
-            l_slot_ind = eeprom_read(l_base);
-            if (l_slot_ind == 0xFF)
-               continue;
-            g_c_ind = l_slot_ind;
-            g_c_cap = eeprom_read(l_base + 1);
-            g_c_SW  = eeprom_read(l_base + 2) & 1u;
-            set_ind(g_c_ind);
-            set_cap(g_c_cap);
-            set_sw(g_c_SW);
-            get_swr();
-            if (g_i_SWR == 0)
+            for (l_slot = 0; l_slot < l_count; l_slot++)
             {
-               g_c_ind = l_tune_ind_mem; g_c_cap = l_tune_cap_mem; g_c_SW = l_tune_sw_mem;
-               set_ind(g_c_ind); set_cap(g_c_cap); set_sw(g_c_SW);
-               return;
-            }
-            if (g_i_SWR < 150)
-            {
-               l_probe_matched = 1;
-               return;
+               l_base = EEPROM_BAND_SLOT_0
+                      + (unsigned char)(l_slot * EEPROM_BAND_SLOT_STRIDE);
+               l_slot_ind = eeprom_read(l_base + 1);
+               if (l_slot_ind == 0xFF)
+                  continue;
+               l_slot_freq = eeprom_read(l_base);
+               if (l_phase == 0u)
+               {
+                  if (l_slot_freq == 0)
+                     continue;
+                  /* larger-minus-smaller is always non-negative (both unsigned char) */
+                  l_diff = (l_slot_freq > l_freq)
+                         ? (unsigned char)(l_slot_freq - l_freq)
+                         : (unsigned char)(l_freq - l_slot_freq);
+                  if (l_diff > EEPROM_BAND_FREQ_TOL)
+                     continue;
+               }
+               else
+               {
+                  /* skip freq-tagged slots when we have a measured freq —
+                   * they were tried in Phase A; wrong-band slots would fail anyway */
+                  if (l_slot_freq > 0 && l_freq > 0)
+                     continue;
+               }
+               g_c_ind = l_slot_ind;
+               g_c_cap = eeprom_read(l_base + 2);
+               g_c_SW  = eeprom_read(l_base + 3) & 1u;
+               set_ind(g_c_ind);
+               set_cap(g_c_cap);
+               set_sw(g_c_SW);
+               get_swr();
+               if (g_i_SWR == 0)
+               {
+                  g_c_ind = l_tune_ind_mem; g_c_cap = l_tune_cap_mem; g_c_SW = l_tune_sw_mem;
+                  set_ind(g_c_ind); set_cap(g_c_cap); set_sw(g_c_SW);
+                  return;
+               }
+               if (g_i_SWR < 150)
+               {
+                  l_probe_matched = 1;
+                  return;
+               }
             }
          }
          // no slot matched — reset SW before full tune
@@ -719,12 +755,12 @@ void tune()
    }
    if (g_i_SWR < 120)
    {
-      band_slot_save(l_probe_matched);
+      band_slot_save(l_probe_matched, l_freq);
       return;
    }
    if (e_c_num_C_q == 5 & e_c_num_L_q == 5)
    {
-      band_slot_save(l_probe_matched);
+      band_slot_save(l_probe_matched, l_freq);
       return;
    }
 
@@ -746,7 +782,7 @@ void tune()
    }
    if (g_i_SWR < 120)
    {
-      band_slot_save(l_probe_matched);
+      band_slot_save(l_probe_matched, l_freq);
       return;
    }
    if (e_c_num_C_q > 5)
