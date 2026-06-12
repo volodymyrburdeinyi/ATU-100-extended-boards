@@ -211,10 +211,6 @@ void debugprint(void);
 
     void Test_init(void);
 
-//  uncomment out the next line if you want to have a uart output the
-//  displayed strings
-//#define UART  /* moved to top of MPLAB_COMPILER section so #ifdef UART guards see it */
-
 //  the posstr is the position.  
 //   the thousands digit is the row, the 3 ls digits is the column
 void uart_wr_str(char posstr[],char str[], char leng);
