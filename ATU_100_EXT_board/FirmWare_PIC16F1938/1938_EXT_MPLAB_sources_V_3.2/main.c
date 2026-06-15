@@ -46,7 +46,7 @@ __eeprom unsigned char initial_eeprom[256] = {
     0x00,0x50,0x01,0x10,0x02,0x20,0x04,0x50,0x10,0x00,0x22,0x00,0x45,0x00,0xff,0xff,
     0x00,0x10,0x00,0x22,0x00,0x47,0x01,0x00,0x02,0x20,0x04,0x70,0x10,0x00,0xff,0xff,
     0x00,0x10,0x00,0x00,0x00,0x00,0x08,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
-    0x01,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
     0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
     0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
     0x01,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
@@ -1423,10 +1423,9 @@ static unsigned char parse_hex8(const char *s)
 }
 
 /* Find a freq-tagged slot within EEPROM_BAND_FREQ_TOL of l_freq.
-   If found: apply relays, measure SWR.
-   Returns  1 if SWR < 150 (match good).
+   If found: apply relays, load stored SWR into g_i_SWR, return 1.
    Returns  0 if no matching slot.
-   Returns -1 if SWR == 0 (TX absent — relays left at last-tried position, caller restores). */
+   No live SWR measurement — safe to call in RX (no TX power present). */
 static signed char band_slot_apply_freq(unsigned char l_freq)
 {
     unsigned char l_slot, l_base, l_slot_ind, l_count, l_slot_freq, l_diff;
@@ -1448,9 +1447,8 @@ static signed char band_slot_apply_freq(unsigned char l_freq)
         set_ind(g_c_ind);
         set_cap(g_c_cap);
         set_sw(g_c_SW);
-        get_swr();
-        if (g_i_SWR == 0) return -1;
-        if (g_i_SWR < 150) return 1;
+        g_i_SWR = (int)eeprom_read(l_base + 4) * 10;
+        return 1;
     }
     return 0;
 }
@@ -1464,7 +1462,6 @@ static void uart_exec_cmd(const char *l_cmd, unsigned char l_len)
     } else if (l_cmd[0] == 'l' && l_len >= 4u) {
         /* "l HH" — recall slot by freq_enc, apply relays, report result */
         unsigned char l_freq = parse_hex8(l_cmd + 2);
-        char l_save_ind = g_c_ind, l_save_cap = g_c_cap, l_save_sw = g_c_SW;
         signed char l_result = band_slot_apply_freq(l_freq);
         if (l_result == 1) {
             uart_puts("RECALL IND="); uart_putuint(g_c_ind);
@@ -1472,12 +1469,8 @@ static void uart_exec_cmd(const char *l_cmd, unsigned char l_len)
             uart_puts(" SW=");        uart_putuint(g_c_SW);
             uart_puts(" SWR=");       uart_putuint(g_i_SWR);
             uart_puts("\r\n");
-        } else if (l_result == 0) {
-            uart_puts("NOMATCH\r\n");
         } else {
-            g_c_ind = l_save_ind; g_c_cap = l_save_cap; g_c_SW = l_save_sw;
-            set_ind(g_c_ind); set_cap(g_c_cap); set_sw(g_c_SW);
-            uart_puts("ERR ABORT\r\n");
+            uart_puts("NOMATCH\r\n");
         }
     } else if (l_cmd[0] == 'm') {
         /* "m" — dump all band slots */
@@ -1546,8 +1539,11 @@ void uart_cmd_proc(void)
                 uart_exec_cmd(l_buf, l_len);
                 l_len = 0;
             }
-        } else if (l_len < 11u) {
-            l_buf[l_len++] = (char)l_c;
+        } else if (l_c >= 0x20u && l_c <= 0x7Eu) {
+            if (l_len < 11u)
+                l_buf[l_len++] = (char)l_c;
+        } else {
+            l_len = 0;   /* non-printable = RF noise — discard partial command */
         }
     }
 }

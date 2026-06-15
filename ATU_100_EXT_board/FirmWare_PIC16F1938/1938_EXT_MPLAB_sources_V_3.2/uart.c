@@ -29,7 +29,7 @@ void uart_puts(const char *s)
         uart_tx_bit_bang((unsigned char)*s++);
 }
 
-/* uart_wr_str: display-protocol wrapper used by existing led_wr_str path */
+/* uart_wr_str: display-protocol wrapper used by existing led_wr_str path. */
 void uart_wr_str(char posstr[], char str[], char leng)
 {
     char i;

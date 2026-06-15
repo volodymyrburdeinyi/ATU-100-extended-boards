@@ -47,6 +47,9 @@ import tty
 import select
 import time
 import threading
+import queue
+import re
+import atexit
 
 WSJT_PORT       = 2237
 WSJT_MAGIC      = 0xADBCCBDA
@@ -116,6 +119,13 @@ def parse_status(d):
     return hz, bool(d[off])
 
 
+# ── async reader routing ─────────────────────────────────────────────────────
+
+_response_queue = queue.Queue()          # control-protocol lines from PIC
+_DISP_RE  = re.compile(r'^\d{4}:')      # display-protocol prefix  e.g. "2016:"
+_SWR_RE   = re.compile(r'SWR=(\d+\.\d+)')  # SWR inside display string
+
+
 # ── serial port ──────────────────────────────────────────────────────────────
 
 class SerialError(Exception):
@@ -138,28 +148,25 @@ def open_serial(port):
 
 
 def serial_cmd(fd, cmd, timeout=5.0):
-    """Send cmd\\r, return first response line or None on timeout.
-    Raises SerialError on OS failure."""
+    """Send cmd\\r; return first control-protocol response from reader queue.
+    Raises SerialError on OS write failure."""
+    # Drain stale control responses that arrived between commands
+    while True:
+        try:
+            _response_queue.get_nowait()
+        except queue.Empty:
+            break
     try:
         os.write(fd, (cmd + '\r').encode())
     except OSError as e:
         raise SerialError(str(e))
-    buf = b''
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        remaining = max(0.0, deadline - time.monotonic())
         try:
-            r, _, _ = select.select([fd], [], [], 0.2)
-            if r:
-                chunk = os.read(fd, 64)
-                if not chunk:
-                    raise SerialError('EOF')
-                buf += chunk
-                if len(buf) > _SERIAL_BUF_MAX:
-                    raise SerialError('response overflow')
-                if b'\n' in buf:
-                    return buf.split(b'\n')[0].strip().decode(errors='replace')
-        except OSError as e:
-            raise SerialError(str(e))
+            return _response_queue.get(timeout=min(remaining, 0.2))
+        except queue.Empty:
+            continue
     return None
 
 
@@ -171,6 +178,63 @@ def valid_response(cmd, resp):
     if cmd.startswith('t'):
         return 'IND=' in resp
     return True
+
+
+def _parse_display(line):
+    """Extract SWR from a display-protocol line and update shared state."""
+    m = _SWR_RE.search(line)
+    if m:
+        try:
+            swr = int(round(float(m.group(1)) * 100))
+            with lock:
+                st['swr'] = swr
+            st['need_redraw'].set()
+        except ValueError:
+            pass
+
+
+def serial_reader(port):
+    """Background thread: reads all PIC output, routes lines to display parser
+    or response queue."""
+    buf    = b''
+    cur_fd = None
+    while not st['quit'].is_set():
+        with lock:
+            fd = st['fd']
+        if fd != cur_fd:
+            buf    = b''
+            cur_fd = fd
+        if cur_fd is None:
+            time.sleep(0.3)
+            continue
+        try:
+            r, _, _ = select.select([cur_fd], [], [], 0.5)
+            if not r:
+                continue
+            chunk = os.read(cur_fd, 256)
+            if not chunk:
+                with lock:
+                    if st['fd'] == cur_fd:
+                        _serial_lost(port)
+                buf    = b''
+                cur_fd = None
+                continue
+            buf += chunk
+            while b'\n' in buf:
+                line_b, buf = buf.split(b'\n', 1)
+                line = line_b.strip().decode(errors='replace')
+                if not line:
+                    continue
+                if _DISP_RE.match(line):
+                    _parse_display(line)
+                else:
+                    _response_queue.put(line)
+        except OSError:
+            with lock:
+                if st['fd'] == cur_fd:
+                    _serial_lost(port)
+            buf    = b''
+            cur_fd = None
 
 
 def _extract_swr(resp):
@@ -362,6 +426,7 @@ def udp_loop(sock, port):
 # ── event loop (WSJT-X auto) ─────────────────────────────────────────────────
 
 def event_loop(port):
+    last_enc = 0
     while not st['quit'].is_set():
         triggered = st['event'].wait(timeout=1.0)
         if triggered:
@@ -370,15 +435,16 @@ def event_loop(port):
                 enc     = st['enc']
                 tx      = st['tx']
                 pending = st['pending_tune_enc']
-            # TX just ended: fire deferred tune if one is waiting
+            # TX just ended with a pending tune — fire it
             if not tx and pending:
                 with lock:
                     st['pending_tune_enc'] = 0
                 threading.Thread(
                     target=run_band, args=(port, pending, True), daemon=True
                 ).start()
-            elif enc:
-                # Normal band change: try recall (fires immediately, even during TX)
+            elif enc != last_enc:
+                # Genuine band change — recall immediately (even during TX for pre-positioning)
+                last_enc = enc
                 threading.Thread(
                     target=run_band, args=(port, enc), daemon=True
                 ).start()
@@ -437,48 +503,42 @@ def _dispatch_line(port, cmd):
 
 
 def input_loop(port):
-    fd  = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    tty.setcbreak(fd)
-    try:
-        while not st['quit'].is_set():
-            r, _, _ = select.select([sys.stdin], [], [], 0.1)
-            if not r:
-                continue
-            ch = sys.stdin.read(1)
-            if not ch:
-                break
+    while not st['quit'].is_set():
+        r, _, _ = select.select([sys.stdin], [], [], 0.1)
+        if not r:
+            continue
+        ch = sys.stdin.read(1)
+        if not ch:
+            break
 
-            with lock:
-                lm  = st['line_mode']
-                buf = st['line_buf']
+        with lock:
+            lm  = st['line_mode']
+            buf = st['line_buf']
 
-            if lm:
-                if ch in ('\r', '\n'):
-                    cmd = buf.strip()
-                    with lock:
-                        st['line_mode'] = False
-                        st['line_buf']  = ''
-                    st['need_redraw'].set()
-                    if cmd:
-                        _dispatch_line(port, cmd)
-                elif ch == '\x1b':
-                    with lock:
-                        st['line_mode'] = False
-                        st['line_buf']  = ''
-                    set_status('cancelled')
-                elif ch in ('\x7f', '\x08'):
-                    with lock:
-                        st['line_buf'] = st['line_buf'][:-1]
-                    st['need_redraw'].set()
-                else:
-                    with lock:
-                        st['line_buf'] += ch
-                    st['need_redraw'].set()
+        if lm:
+            if ch in ('\r', '\n'):
+                cmd = buf.strip()
+                with lock:
+                    st['line_mode'] = False
+                    st['line_buf']  = ''
+                st['need_redraw'].set()
+                if cmd:
+                    _dispatch_line(port, cmd)
+            elif ch == '\x1b':
+                with lock:
+                    st['line_mode'] = False
+                    st['line_buf']  = ''
+                set_status('cancelled')
+            elif ch in ('\x7f', '\x08'):
+                with lock:
+                    st['line_buf'] = st['line_buf'][:-1]
+                st['need_redraw'].set()
             else:
-                _dispatch_key(port, ch)
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                with lock:
+                    st['line_buf'] += ch
+                st['need_redraw'].set()
+        else:
+            _dispatch_key(port, ch)
 
 
 # ── display ───────────────────────────────────────────────────────────────────
@@ -573,6 +633,21 @@ def main():
         sys.exit(0)
     port = sys.argv[1]
 
+    # Terminal setup — owned here so atexit always restores it regardless of
+    # which thread causes the exit (daemon threads don't run their finally blocks)
+    _stdin_fd  = sys.stdin.fileno()
+    _old_term  = termios.tcgetattr(_stdin_fd)
+    def _restore_term():
+        try:
+            termios.tcsetattr(_stdin_fd, termios.TCSADRAIN, _old_term)
+            sys.stdout.write('\033[?25h\033[0m')
+            sys.stdout.flush()
+        except Exception:
+            pass
+        os.system('stty sane 2>/dev/null')
+    atexit.register(_restore_term)
+    tty.setcbreak(_stdin_fd)
+
     try:
         fd = open_serial(port)
         with lock:
@@ -600,9 +675,10 @@ def main():
         set_status(f'ready (WSJT-X UDP unavailable: {e})')
 
     threads = [
-        (event_loop,   (port,)),
-        (display_loop, (port,)),
-        (input_loop,   (port,)),
+        (serial_reader, (port,)),
+        (event_loop,    (port,)),
+        (display_loop,  (port,)),
+        (input_loop,    (port,)),
     ]
     if sock is not None:
         threads.insert(0, (udp_loop, (sock, port)))
@@ -610,13 +686,13 @@ def main():
     for target, args in threads:
         threading.Thread(target=target, args=args, daemon=True).start()
 
-    print('\033[?25l', end='', flush=True)   # hide cursor
+    sys.stdout.write('\033[?25l')   # hide cursor
+    sys.stdout.flush()
     try:
         st['quit'].wait()
     except KeyboardInterrupt:
-        pass
+        st['quit'].set()
     finally:
-        print('\033[?25h\033[2J\033[H')      # restore cursor, clear
         if sock:
             sock.close()
 
