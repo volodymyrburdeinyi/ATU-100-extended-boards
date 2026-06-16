@@ -16,6 +16,7 @@
  *   S7  Phase A freq hit      — freq-tagged slot on matching band recalled by Phase A
  *   S8  Phase A miss + Phase B skip — tagged slot for wrong band, falls through to full tune
  *   S9  freq saved with slot  — band_slot_save() writes measured freq_enc into slot
+ *   S10 upsert               — re-tuning existing freq updates slot in place, not ptr slot
  */
 
 #include <stdio.h>
@@ -379,22 +380,38 @@ static void sub_tune(void)
 static void band_slot_save(char l_probe_matched, unsigned char l_freq)
 {
     unsigned char l_ptr, l_base, l_count;
+    unsigned char l_slot, l_sf, l_si, l_d, l_existing;
     if (l_probe_matched) return;
     if (g_char_tune_effort <= EEPROM_BAND_EFFORT_THR) return;
     if (g_i_SWR == 0 || g_i_SWR >= 150) return;
     l_count = eeprom_read(EEPROM_BAND_COUNT);
     if (l_count < 1 || l_count > EEPROM_BAND_SLOT_COUNT) return;
-    l_ptr = eeprom_read(EEPROM_BAND_PTR);
-    if (l_ptr >= l_count) l_ptr = 0;
-    l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_ptr * EEPROM_BAND_SLOT_STRIDE);
+    l_existing = 0xFF;
+    for (l_slot = 0; l_slot < l_count; l_slot++) {
+        l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_slot * EEPROM_BAND_SLOT_STRIDE);
+        l_si = eeprom_read(l_base + 1);
+        if (l_si == 0xFF) continue;
+        l_sf = eeprom_read(l_base);
+        if (l_sf == 0) continue;
+        l_d = (l_sf > l_freq) ? (unsigned char)(l_sf - l_freq)
+                               : (unsigned char)(l_freq - l_sf);
+        if (l_d <= EEPROM_BAND_FREQ_TOL) { l_existing = l_slot; break; }
+    }
+    if (l_existing != 0xFF) {
+        l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_existing * EEPROM_BAND_SLOT_STRIDE);
+    } else {
+        l_ptr = eeprom_read(EEPROM_BAND_PTR);
+        if (l_ptr >= l_count) l_ptr = 0;
+        l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_ptr * EEPROM_BAND_SLOT_STRIDE);
+        l_ptr++;
+        if (l_ptr >= l_count) l_ptr = 0;
+        eeprom_write(EEPROM_BAND_PTR, l_ptr);
+    }
     eeprom_write(l_base,     l_freq);
     eeprom_write(l_base + 1, g_c_ind);
     eeprom_write(l_base + 2, g_c_cap);
     eeprom_write(l_base + 3, (unsigned char)(g_c_SW & 1u));
     eeprom_write(l_base + 4, (char)(g_i_SWR / 10));
-    l_ptr++;
-    if (l_ptr >= l_count) l_ptr = 0;
-    eeprom_write(EEPROM_BAND_PTR, l_ptr);
 }
 
 /* VERBATIM: main.h tune() */
@@ -748,6 +765,38 @@ int main(void)
         unsigned char saved_ind  = eeprom_read(EEPROM_BAND_SLOT_0 + 1);
         CHECK("S9 freq saved in slot — saved_freq=70, ind matches tune result",
               saved_freq == 70 && saved_ind == (unsigned char)r.ind && r.swr < 130, r);
+    }
+
+    /* S10: upsert — re-tuning 40m must update the existing 40m slot in place,
+       not overwrite the 30m slot that the circular pointer happens to point at. */
+    {
+        reset_state();
+        eeprom_write(EEPROM_BAND_COUNT, 2);
+        /* Slot 0: 40m (freq=35, ind=0, cap=12, sw=1). ptr=1 (30m slot is next). */
+        eeprom_write(EEPROM_BAND_SLOT_0,      35);  /* freq_enc: 40m */
+        eeprom_write(EEPROM_BAND_SLOT_0 + 1,   0);  /* ind */
+        eeprom_write(EEPROM_BAND_SLOT_0 + 2,  12);  /* cap */
+        eeprom_write(EEPROM_BAND_SLOT_0 + 3,   1);  /* sw  */
+        eeprom_write(EEPROM_BAND_SLOT_0 + 4,  11);  /* swr/10 */
+        /* Slot 1: 30m (freq=50, ind=8, cap=30, sw=0). */
+        unsigned char s1 = EEPROM_BAND_SLOT_0 + EEPROM_BAND_SLOT_STRIDE;
+        eeprom_write(s1,       50);  /* freq_enc: 30m */
+        eeprom_write(s1 + 1,    8);  /* ind */
+        eeprom_write(s1 + 2,   30);  /* cap */
+        eeprom_write(s1 + 3,    0);  /* sw  */
+        eeprom_write(s1 + 4,   10);  /* swr/10 */
+        eeprom_write(EEPROM_BAND_PTR, 1);  /* ptr points at slot 1 (30m) */
+        /* Now re-tune 40m — upsert must find slot 0 and update it, NOT slot 1 */
+        sim_freq = 35;
+        current_model = model_simple_20m;  /* reuse: gives SWR < 150 at ind=32, cap=24 */
+        tune();
+        /* Slot 1 (30m) must be untouched */
+        unsigned char s1_freq = eeprom_read(s1);
+        unsigned char s1_ind  = eeprom_read(s1 + 1);
+        /* ptr must NOT have advanced past slot 1 (no new-slot allocation occurred) */
+        unsigned char new_ptr = eeprom_read(EEPROM_BAND_PTR);
+        CHECK("S10 upsert — 40m re-tune updates slot 0 in place, 30m slot 1 untouched",
+              s1_freq == 50 && s1_ind == 8 && new_ptr == 1, ((result_t){g_c_ind, g_c_cap, g_c_SW, g_i_SWR}));
     }
 
     printf("\n%d/%d passed\n", passed, total);

@@ -124,6 +124,15 @@ def parse_status(d):
 _response_queue = queue.Queue()          # control-protocol lines from PIC
 _DISP_RE  = re.compile(r'^\d{4}:')      # display-protocol prefix  e.g. "2016:"
 _SWR_RE   = re.compile(r'SWR=(\d+\.\d+)')  # SWR inside display string
+_CTRL_SWR_RE = re.compile(r'\bSWR=(\d+)\b')  # SWR in control-protocol (×100 integer)
+
+
+def _fmt_ctrl_resp(resp):
+    """Reformat SWR=NNN (×100) → SWR=N.NN in raw control-protocol responses."""
+    def _repl(m):
+        v = int(m.group(1))
+        return f'SWR={v/100:.2f}' if v > 0 else 'SWR=0.00'
+    return _CTRL_SWR_RE.sub(_repl, resp)
 
 
 # ── serial port ──────────────────────────────────────────────────────────────
@@ -381,7 +390,7 @@ def run_cmd(port, cmd):
             with lock:
                 if swr:
                     st['swr'] = swr
-            set_status(f'{resp}')
+            set_status(_fmt_ctrl_resp(resp))
         except SerialError as e:
             set_status(f'serial error: {e}')
             with lock:

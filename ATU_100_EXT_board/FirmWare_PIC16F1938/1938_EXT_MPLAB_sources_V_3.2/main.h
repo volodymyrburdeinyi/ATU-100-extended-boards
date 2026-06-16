@@ -617,22 +617,40 @@ static unsigned char measure_freq(void) {
 static void band_slot_save(char l_probe_matched, unsigned char l_freq)
 {
    unsigned char l_ptr, l_base, l_count;
+   unsigned char l_slot, l_sf, l_si, l_d, l_existing;
    if (l_probe_matched) return;
    if (g_char_tune_effort <= EEPROM_BAND_EFFORT_THR) return;
    if (g_i_SWR == 0 || g_i_SWR >= 150) return;
    l_count = eeprom_read(EEPROM_BAND_COUNT);
    if (l_count < 1 || l_count > EEPROM_BAND_SLOT_COUNT) return;
-   l_ptr = eeprom_read(EEPROM_BAND_PTR);
-   if (l_ptr >= l_count) l_ptr = 0;
-   l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_ptr * EEPROM_BAND_SLOT_STRIDE);
+   /* Search for an existing slot matching l_freq — update in place rather than
+      blindly advancing the circular pointer into another band's slot. */
+   l_existing = 0xFF;
+   for (l_slot = 0; l_slot < l_count; l_slot++) {
+      l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_slot * EEPROM_BAND_SLOT_STRIDE);
+      l_si = eeprom_read(l_base + 1);
+      if (l_si == 0xFF) continue;
+      l_sf = eeprom_read(l_base);
+      if (l_sf == 0) continue;
+      l_d = (l_sf > l_freq) ? (unsigned char)(l_sf - l_freq)
+                             : (unsigned char)(l_freq - l_sf);
+      if (l_d <= EEPROM_BAND_FREQ_TOL) { l_existing = l_slot; break; }
+   }
+   if (l_existing != 0xFF) {
+      l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_existing * EEPROM_BAND_SLOT_STRIDE);
+   } else {
+      l_ptr = eeprom_read(EEPROM_BAND_PTR);
+      if (l_ptr >= l_count) l_ptr = 0;
+      l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_ptr * EEPROM_BAND_SLOT_STRIDE);
+      l_ptr++;
+      if (l_ptr >= l_count) l_ptr = 0;
+      eeprom_write(EEPROM_BAND_PTR, l_ptr);
+   }
    eeprom_write(l_base,     l_freq);
    eeprom_write(l_base + 1, g_c_ind);
    eeprom_write(l_base + 2, g_c_cap);
    eeprom_write(l_base + 3, (unsigned char)(g_c_SW & 1u));
    eeprom_write(l_base + 4, (char)(g_i_SWR / 10));
-   l_ptr++;
-   if (l_ptr >= l_count) l_ptr = 0;
-   eeprom_write(EEPROM_BAND_PTR, l_ptr);
 }
 
 void tune()
