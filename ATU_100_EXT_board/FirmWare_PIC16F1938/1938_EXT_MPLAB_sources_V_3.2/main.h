@@ -600,8 +600,7 @@ static void band_slot_save(char l_probe_matched, unsigned int l_freq_kHz)
    unsigned int  l_sf, l_diff;
    unsigned char l_existing_sub, l_empty_sub, l_worst_sub, l_worst_swr;
    if (l_probe_matched) return;
-   if (g_char_tune_effort <= EEPROM_BAND_EFFORT_THR) return;
-   if (g_i_SWR == 0 || g_i_SWR >= 150) return;
+   if (g_i_SWR == 0 || g_i_SWR >= 300) return;
    if (l_freq_kHz == 0) return;
    l_band = freq_to_band_idx(l_freq_kHz);
    if (l_band == 0xFF) return;
@@ -659,13 +658,16 @@ void tune()
    l_tune_ind_mem = g_c_ind;
    l_tune_cap_mem = g_c_cap;
    l_tune_sw_mem  = g_c_SW;
-   get_swr();
-   if (g_i_SWR < 110)
-      return;
    l_freq_kHz = measure_freq();
 #ifdef UART
    if (l_freq_kHz == 0 && g_i_uart_freq_hint != 0) { l_freq_kHz = g_i_uart_freq_hint; g_i_uart_freq_hint = 0; }
 #endif
+   get_swr();
+   if (g_i_SWR < 110)
+   {
+      band_slot_save(l_probe_matched, l_freq_kHz);
+      return;
+   }
    /* probe band memory: search the 3 sub-slots for the current band */
    if (l_freq_kHz > 0)
    {
@@ -804,6 +806,7 @@ void tune()
       g_c_C_mult = 2;
    else if (e_c_num_C_q == 7)
       g_c_C_mult = 4;
+   get_swr();
    band_slot_save(l_probe_matched, l_freq_kHz);
    CLRWDT();
    return;

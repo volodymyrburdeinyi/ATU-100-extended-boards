@@ -1406,6 +1406,7 @@ static void uart_send_status(void)
     uart_puts(" SW=");   uart_putuint(g_c_SW);
     uart_puts(" SWR=");  uart_putuint(g_i_SWR);
     uart_puts(" AUTO="); uart_putuint(g_b_Auto_mode);
+    uart_puts(" EFF=");   uart_putuint(g_char_tune_effort);
     uart_puts(" SLOTS="); uart_putuint(EEPROM_BAND_SLOT_COUNT);
     uart_puts(" SAVED="); uart_putuint(g_b_slot_saved);
     uart_puts("\r\n");
@@ -1495,6 +1496,7 @@ static void uart_exec_cmd(const char *l_cmd, unsigned char l_len)
     } else if (l_cmd[0] == 'l' && l_len >= 6u) {
         /* "l HHHH" — recall nearest slot for freq in kHz, apply relays, report */
         unsigned int  l_freq_kHz = parse_hex16(l_cmd + 2);
+        g_i_uart_freq_hint = l_freq_kHz;
         signed char l_result = band_slot_apply_freq(l_freq_kHz);
         if (l_result == 1) {
             uart_puts("RECALL IND="); uart_putuint(g_c_ind);

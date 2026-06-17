@@ -69,7 +69,7 @@ extern "C"
 #define EEPROM_BAND_N            10
 #define EEPROM_BAND_SUB_N        3
 #define EEPROM_BAND_SLOT_COUNT   30
-#define EEPROM_BAND_EFFORT_THR   20
+
 #define EEPROM_BAND_SLOT_0       0x38
 #define EEPROM_BAND_SLOT_STRIDE  5
 #define EEPROM_BAND_FREQ_TOL_KHZ 25
