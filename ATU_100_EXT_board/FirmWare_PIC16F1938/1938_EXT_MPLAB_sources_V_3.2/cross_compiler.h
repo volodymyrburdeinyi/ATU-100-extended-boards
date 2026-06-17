@@ -59,18 +59,25 @@ extern "C"
 #define EEPROM_LAST_SWR_H 252
 #define EEPROM_LAST_SWR_L 251
 
-/* band memory: config byte + circular pointer + N slots x 5 bytes (freq_enc, ind, cap, sw, swr/10) */
-/* EEPROM_BAND_COUNT: 0 = feature off, 1-EEPROM_BAND_SLOT_COUNT = number of active slots           */
-/* EEPROM_FORMAT_VERSION follows immediately after the slot area; moves automatically with count    */
-/* Max safe slot count: (0xFB - 0x38) / 5 = 38. Practical limit: 9 HF bands = 12 slots           */
-#define EEPROM_BAND_SLOT_COUNT  8
-#define EEPROM_BAND_EFFORT_THR  20
-#define EEPROM_BAND_COUNT       0x36
-#define EEPROM_BAND_PTR         0x37
-#define EEPROM_BAND_SLOT_0      0x38
-#define EEPROM_BAND_SLOT_STRIDE 5
-#define EEPROM_BAND_FREQ_TOL    2
-#define EEPROM_FORMAT_VERSION   (EEPROM_BAND_SLOT_0 + EEPROM_BAND_SLOT_COUNT * EEPROM_BAND_SLOT_STRIDE)
+/* band memory: 10 bands x 3 sub-slots x 5 bytes = 150 bytes (0x38-0xC9)
+   Slot layout: freq_lo, freq_hi, ind, cap, sw_swr_packed
+   sw_swr_packed: bit7 = sw (0/1), bits6-0 = swr/10 (clamped to 127)
+   Empty slot sentinel: ind byte (offset 2) == 0xFF
+   Format version byte at 0x36; wipe+reinit when != EEPROM_BAND_FORMAT_VER  */
+#define EEPROM_BAND_FORMAT_CELL  0x36
+#define EEPROM_BAND_FORMAT_VER   2
+#define EEPROM_BAND_N            10
+#define EEPROM_BAND_SUB_N        3
+#define EEPROM_BAND_SLOT_COUNT   30
+#define EEPROM_BAND_EFFORT_THR   20
+#define EEPROM_BAND_SLOT_0       0x38
+#define EEPROM_BAND_SLOT_STRIDE  5
+#define EEPROM_BAND_FREQ_TOL_KHZ 25
+#define EEPROM_SLOT_FREQ_LO      0
+#define EEPROM_SLOT_FREQ_HI      1
+#define EEPROM_SLOT_IND          2
+#define EEPROM_SLOT_CAP          3
+#define EEPROM_SLOT_SW_SWR       4
 
 #define EEPROM_DISABLE_RELAYS 0x35
 #define EEPROM_FEEDER_LOSS 0x34
@@ -201,8 +208,10 @@ void debugprint(void);
     void uart_puts(const char *s);
     void uart_tx_bit_bang(unsigned char val);
     void uart_cmd_proc(void);
-    /* freq hint injected by "t HH" command; consumed once by tune() */
-    extern unsigned char g_c_uart_freq_hint;
+    /* freq hint injected by "t HHHH" command; consumed once by tune() */
+    extern unsigned int  g_i_uart_freq_hint;
+    /* set to 1 by band_slot_save() when an EEPROM write occurs; cleared at tune() start */
+    extern unsigned char g_b_slot_saved;
 #endif
 
     void IntToStr(int number, char *output);

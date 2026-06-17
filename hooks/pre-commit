@@ -57,17 +57,17 @@ else
   echo "PASS  Fix 2b: coarse_tune() non-greedy with min_swr = 9999"
 fi
 
-# Band memory: band_slot_save() must use unsigned char for ptr/base to avoid signed wrap corrupting settings area
-if ! awk '/static void band_slot_save/,/^}/' "$MAIN_H" 2>/dev/null | grep -q 'unsigned char l_ptr, l_base'; then
-  echo "FAIL  Band memory: band_slot_save() uses signed char for l_ptr/l_base — will corrupt EEPROM on first run"
+# Band memory: band_slot_save() must use unsigned char for address locals to avoid signed wrap corrupting settings area
+if ! awk '/static void band_slot_save/,/^}/' "$MAIN_H" 2>/dev/null | grep -q 'unsigned char l_band, l_sub, l_slot_idx, l_base, l_ind'; then
+  echo "FAIL  Band memory: band_slot_save() address locals not unsigned char — signed wrap will corrupt EEPROM"
   FAIL=1
 else
-  echo "PASS  Band memory: band_slot_save() uses unsigned char for ptr/base"
+  echo "PASS  Band memory: band_slot_save() uses unsigned char for address locals"
 fi
 
-# Band memory: probe loop in tune() must use unsigned char for l_slot_ind — signed char makes 0xFF sentinel check always false
-if ! awk '/\/\/ probe band memory slots/,/no slot matched/' "$MAIN_H" 2>/dev/null | grep -q 'unsigned char l_slot, l_base, l_slot_ind'; then
-  echo "FAIL  Band memory: probe loop uses signed char l_slot_ind — fresh EEPROM slots never skipped"
+# Band memory: probe loop in tune() must use unsigned char for l_ind — signed char makes 0xFF sentinel check always false
+if ! awk '/probe band memory/,/l_probe_matched = 1/' "$MAIN_H" 2>/dev/null | grep -q 'unsigned char l_sub, l_slot_idx, l_base, l_ind'; then
+  echo "FAIL  Band memory: probe loop l_ind not unsigned char — 0xFF sentinel never matches on fresh EEPROM"
   FAIL=1
 else
   echo "PASS  Band memory: probe loop uses unsigned char for slot locals"

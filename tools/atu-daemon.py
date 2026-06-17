@@ -14,7 +14,7 @@ usage:
   python3 atu-daemon.py /dev/ttyUSB0
 
 keys (no Enter needed):
-  1 … 9   recall saved slot for that band (160m … 10m)
+  0 … 9   recall saved slot for that band (6m … 160m, key 0 = 6m)
   t       tune current band (shown in display)
   r       reset relays to zero
   ?       query ATU status
@@ -23,17 +23,14 @@ keys (no Enter needed):
   q       quit
 
 command line (after pressing :):
-  t [HH]   tune; optional freq hint in hex  e.g. t 46  (14 MHz)
-  l HH     recall saved slot for freq
-  m        dump all saved band slots
-  e HH     read EEPROM cell               e.g. e 36
-  c HH VV  write EEPROM cell              e.g. c 36 08
-  a        toggle auto mode
-  r        reset relays
-  ?        ATU status line (IND CAP SW SWR AUTO SLOTS)
-
-freq_enc = kHz / 200 = MHz × 5
-  160m=09  80m=11  40m=23  30m=32  20m=46  17m=5a  15m=69  10m=8c
+  t [HHHH]   tune; optional freq hint in kHz hex  e.g. t 1BA2  (7074 kHz)
+  l HHHH     recall nearest slot for freq in kHz  e.g. l 1BA2
+  m          dump all saved band sub-slots (30 total)
+  e HH       read EEPROM cell                     e.g. e 36
+  c HH VV    write EEPROM cell                    e.g. c 36 02
+  a          toggle auto mode
+  r          reset relays
+  ?          ATU status line (IND CAP SW SWR AUTO)
 
 serial port: RB1=TX, RB2=RX, 9600 8N1 (USB-UART converter)
 """
@@ -56,33 +53,35 @@ WSJT_MAGIC      = 0xADBCCBDA
 _SERIAL_BUF_MAX = 512
 
 BANDS = [
-    (12,  25,  '160m'),
-    (25,  33,   '80m'),
-    (33,  45,   '40m'),
-    (45,  58,   '30m'),
-    (58,  80,   '20m'),
-    (80,  97,   '17m'),
-    (97,  115,  '15m'),
-    (115, 132,  '12m'),
-    (132, 155,  '10m'),
+    (1800,  2000,  '160m'),
+    (3500,  4000,   '80m'),
+    (7000,  7300,   '40m'),
+    (10100, 10150,  '30m'),
+    (14000, 14350,  '20m'),
+    (18068, 18168,  '17m'),
+    (21000, 21450,  '15m'),
+    (24890, 24990,  '12m'),
+    (28000, 29700,  '10m'),
+    (50000, 54000,   '6m'),
 ]
 
-# band key → freq_enc (centre of band, kHz / 200)
+# band key → centre freq in kHz
 BAND_KEYS = {
-    '1': (0x09, '160m'),
-    '2': (0x11,  '80m'),
-    '3': (0x23,  '40m'),
-    '4': (0x32,  '30m'),
-    '5': (0x46,  '20m'),
-    '6': (0x5a,  '17m'),
-    '7': (0x69,  '15m'),
-    '8': (0x7c,  '12m'),
-    '9': (0x8c,  '10m'),
+    '1': (1900,  '160m'),
+    '2': (3750,   '80m'),
+    '3': (7074,   '40m'),
+    '4': (10136,  '30m'),
+    '5': (14074,  '20m'),
+    '6': (18100,  '17m'),
+    '7': (21074,  '15m'),
+    '8': (24915,  '12m'),
+    '9': (28074,  '10m'),
+    '0': (50313,   '6m'),
 }
 
 
-def band(enc):
-    return next((n for lo, hi, n in BANDS if lo <= enc < hi), '?')
+def band(khz):
+    return next((n for lo, hi, n in BANDS if lo <= khz <= hi), '?')
 
 
 # ── WSJT-X packet parsing ────────────────────────────────────────────────────
@@ -185,7 +184,7 @@ def valid_response(cmd, resp):
     if cmd.startswith('l'):
         return resp.startswith(('RECALL', 'NOMATCH', 'ERR'))
     if cmd.startswith('t'):
-        return 'IND=' in resp
+        return resp.startswith('IND=')
     return True
 
 
@@ -259,7 +258,7 @@ def _extract_swr(resp):
 
 st = {
     'fd':               None,
-    'enc':              0,
+    'khz':              0,
     'tx':               False,
     'swr':              0,
     'status':           'ready — press h for help',
@@ -270,7 +269,7 @@ st = {
     'quit':             threading.Event(),
     'event':            threading.Event(),
     'need_redraw':      threading.Event(),
-    'pending_tune_enc': 0,   # set when recall hits NOMATCH during TX; tune fires on TX-end
+    'pending_tune_khz': 0,   # set when recall hits NOMATCH during TX; tune fires on TX-end
 }
 lock       = threading.Lock()
 serial_sem = threading.Semaphore(1)   # one serial operation at a time
@@ -309,9 +308,9 @@ def _serial_lost(port):
 
 # ── band operations ──────────────────────────────────────────────────────────
 
-def _do_band(port, enc, force_tune=False):
-    """Recall or tune for enc. Caller must hold serial_sem."""
-    bnd = band(enc)
+def _do_band(port, khz, force_tune=False):
+    """Recall or tune for khz. Caller must hold serial_sem."""
+    bnd = band(khz)
     with lock:
         fd = st['fd']
     if fd is None:
@@ -320,7 +319,7 @@ def _do_band(port, enc, force_tune=False):
     try:
         if not force_tune:
             set_status(f'recalling {bnd}...')
-            resp = serial_cmd(fd, f'l {enc:02x}', timeout=3.0)
+            resp = serial_cmd(fd, f'l {khz:04x}', timeout=3.0)
             if resp is not None and resp.startswith('RECALL'):
                 swr = _extract_swr(resp)
                 with lock:
@@ -333,23 +332,23 @@ def _do_band(port, enc, force_tune=False):
                 tx_now = st['tx']
             if tx_now:
                 with lock:
-                    st['pending_tune_enc'] = enc
+                    st['pending_tune_khz'] = khz
                 set_status(f'no {bnd} slot · will tune after TX')
                 return
 
         set_status(f'tuning {bnd}...')
         t0   = time.monotonic()
-        resp = serial_cmd(fd, f't {enc:02x}', timeout=45.0)
+        resp = serial_cmd(fd, f't {khz:04x}', timeout=45.0)
         if resp is None:
             set_status(f'tune timeout after {time.monotonic()-t0:.0f}s')
             return
-        if not valid_response(f't {enc:02x}', resp):
+        if not valid_response(f't {khz:04x}', resp):
             set_status(f'unexpected ATU response: {resp!r}')
             return
         swr = _extract_swr(resp)
         with lock:
             st['swr'] = swr
-        saved = swr > 0 and swr < 150
+        saved = 'SAVED=1' in (resp or '')
         set_status(f'tuned {bnd} · slot saved' if saved else f'tuned {bnd}')
 
     except SerialError as e:
@@ -358,13 +357,13 @@ def _do_band(port, enc, force_tune=False):
             _serial_lost(port)
 
 
-def run_band(port, enc, force_tune=False):
+def run_band(port, khz, force_tune=False):
     """Acquire serial_sem and run _do_band. Non-blocking: skip if busy."""
     if not serial_sem.acquire(blocking=False):
         set_status('busy — try again')
         return
     try:
-        _do_band(port, enc, force_tune=force_tune)
+        _do_band(port, khz, force_tune=force_tune)
     finally:
         serial_sem.release()
 
@@ -415,12 +414,12 @@ def udp_loop(sock, port):
         if not r:
             continue
         hz, tx = r
-        enc = hz // 200_000
+        khz = hz // 1000
         with lock:
-            changed  = enc > 0 and enc != st['enc']
+            changed  = khz > 0 and khz != st['khz']
             prev_tx  = st['tx']
-            if enc > 0:
-                st['enc'] = enc
+            if khz > 0:
+                st['khz'] = khz
             st['tx'] = tx
         if changed:
             # Recall fires immediately regardless of TX — relay pre-positioning
@@ -435,27 +434,27 @@ def udp_loop(sock, port):
 # ── event loop (WSJT-X auto) ─────────────────────────────────────────────────
 
 def event_loop(port):
-    last_enc = 0
+    last_khz = 0
     while not st['quit'].is_set():
         triggered = st['event'].wait(timeout=1.0)
         if triggered:
             st['event'].clear()
             with lock:
-                enc     = st['enc']
+                khz     = st['khz']
                 tx      = st['tx']
-                pending = st['pending_tune_enc']
+                pending = st['pending_tune_khz']
             # TX just ended with a pending tune — fire it
             if not tx and pending:
                 with lock:
-                    st['pending_tune_enc'] = 0
+                    st['pending_tune_khz'] = 0
                 threading.Thread(
                     target=run_band, args=(port, pending, True), daemon=True
                 ).start()
-            elif enc != last_enc:
+            elif khz != last_khz:
                 # Genuine band change — recall immediately (even during TX for pre-positioning)
-                last_enc = enc
+                last_khz = khz
                 threading.Thread(
-                    target=run_band, args=(port, enc), daemon=True
+                    target=run_band, args=(port, khz), daemon=True
                 ).start()
 
 
@@ -463,17 +462,17 @@ def event_loop(port):
 
 def _dispatch_key(port, ch):
     if ch in BAND_KEYS:
-        enc, _ = BAND_KEYS[ch]
+        khz, _ = BAND_KEYS[ch]
         with lock:
-            st['enc'] = enc
-        threading.Thread(target=run_band, args=(port, enc), daemon=True).start()
+            st['khz'] = khz
+        threading.Thread(target=run_band, args=(port, khz), daemon=True).start()
     elif ch == 't':
         with lock:
-            enc = st['enc']
-        if enc:
-            threading.Thread(target=run_band, args=(port, enc, True), daemon=True).start()
+            khz = st['khz']
+        if khz:
+            threading.Thread(target=run_band, args=(port, khz, True), daemon=True).start()
         else:
-            set_status('no band selected — press 1-9 first')
+            set_status('no band selected — press 0-9 first')
     elif ch == 'r':
         threading.Thread(target=run_cmd, args=(port, 'r'), daemon=True).start()
     elif ch == '?':
@@ -575,7 +574,7 @@ def _age(t):
 
 def draw(port):
     with lock:
-        enc       = st['enc']
+        khz       = st['khz']
         tx        = st['tx']
         swr       = st['swr']
         status    = st['status']
@@ -587,8 +586,8 @@ def draw(port):
     now  = time.strftime('%H:%M:%S')
     sep  = '─' * max(1, 38 - len(port))
     tx_s = f'{_RED}TX{_RST}' if tx else f'{_GRN}RX{_RST}'
-    freq = f'{enc * 0.2:.3f} MHz' if enc else '—'
-    bnd  = band(enc)            if enc else '—'
+    freq = f'{khz / 1000:.3f} MHz' if khz else '—'
+    bnd  = band(khz)            if khz else '—'
 
     line2 = f'  {bnd:5}  {freq}   {tx_s}'
     if swr:
@@ -598,13 +597,13 @@ def draw(port):
 
     # band row — active band highlighted, others dimmed
     active_key = next(
-        (k for k, (ke, _) in BAND_KEYS.items() if abs(ke - enc) <= 2),
+        (k for k, (_, bname) in BAND_KEYS.items() if bname == band(khz)),
         None
-    ) if enc else None
+    ) if khz else None
 
     band_row = '  '
-    for k in '123456789':
-        ke, bname = BAND_KEYS[k]
+    for k in '123456789' + '0':
+        _, bname = BAND_KEYS[k]
         short = bname.replace('m', '')
         if k == active_key:
             band_row += f'{_GRN}[{k}·{short}]{_RST}  '

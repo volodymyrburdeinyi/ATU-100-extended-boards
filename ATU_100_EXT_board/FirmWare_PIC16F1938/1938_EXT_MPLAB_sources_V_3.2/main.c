@@ -45,11 +45,11 @@ __eeprom unsigned char initial_eeprom[256] = {
     0x78,0x05,0x01,0x15,0x13,0x01,0x00,0x00,0x02,0x00,0x07,0x00,0x07,0x00,0x01,0x00,
     0x00,0x50,0x01,0x10,0x02,0x20,0x04,0x50,0x10,0x00,0x22,0x00,0x45,0x00,0xff,0xff,
     0x00,0x10,0x00,0x22,0x00,0x47,0x01,0x00,0x02,0x20,0x04,0x70,0x10,0x00,0xff,0xff,
-    0x00,0x10,0x00,0x00,0x00,0x00,0x08,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0x00,0x10,0x00,0x00,0x00,0x00,0x02,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
     0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
     0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
     0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
-    0x01,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
+    0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
     0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
     0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
     0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,
@@ -1343,19 +1343,20 @@ void cells_init(void)
    e_c_b_Loss_ind = eeprom_read(EEPROM_ADDITIONAL_INDICATION);
    e_c_tenths_Fid_loss = Bcd2Dec(eeprom_read(EEPROM_FEEDER_LOSS));
    e_c_b_Relay_off = Bcd2Dec(eeprom_read(EEPROM_DISABLE_RELAYS));
-   /* guard against old 4-byte slot format after firmware upgrade without EEPROM reprogram */
-   if (eeprom_read(EEPROM_FORMAT_VERSION) != 0x01)
+   /* wipe band slots on format change (new firmware, new slot layout) */
+   if (eeprom_read(EEPROM_BAND_FORMAT_CELL) != (unsigned char)EEPROM_BAND_FORMAT_VER)
    {
       unsigned char l_fi, l_fbase;
-      for (l_fi = 0; l_fi < EEPROM_BAND_SLOT_COUNT; l_fi++) {
-         l_fbase = (unsigned char)(EEPROM_BAND_SLOT_0 + l_fi * EEPROM_BAND_SLOT_STRIDE);
-         eeprom_write((unsigned char)(l_fbase + 1), 0xFF);
+      for (l_fi = 0; l_fi < (unsigned char)EEPROM_BAND_SLOT_COUNT; l_fi++) {
+         CLRWDT();
+         l_fbase = EEPROM_BAND_SLOT_0 + (unsigned char)(l_fi * (unsigned char)EEPROM_BAND_SLOT_STRIDE);
+         eeprom_write(l_fbase,                              0xFF);
+         eeprom_write((unsigned char)(l_fbase + 1),         0xFF);
+         eeprom_write((unsigned char)(l_fbase + 2),         0xFF);
+         eeprom_write((unsigned char)(l_fbase + 3),         0xFF);
+         eeprom_write((unsigned char)(l_fbase + 4),         0xFF);
       }
-      eeprom_write(EEPROM_BAND_PTR, 0xFF);
-      if (eeprom_read(EEPROM_BAND_COUNT) < 1 ||
-          eeprom_read(EEPROM_BAND_COUNT) > EEPROM_BAND_SLOT_COUNT)
-         eeprom_write(EEPROM_BAND_COUNT, EEPROM_BAND_SLOT_COUNT);
-      eeprom_write(EEPROM_FORMAT_VERSION, 0x01);
+      eeprom_write(EEPROM_BAND_FORMAT_CELL, (unsigned char)EEPROM_BAND_FORMAT_VER);
    }
    CLRWDT();
    return;
@@ -1379,7 +1380,8 @@ void show_loss(void)
 
 #ifdef UART
 
-unsigned char g_c_uart_freq_hint = 0;
+unsigned int  g_i_uart_freq_hint = 0;
+unsigned char g_b_slot_saved     = 0;
 
 static void uart_putuint(int v)
 {
@@ -1404,7 +1406,8 @@ static void uart_send_status(void)
     uart_puts(" SW=");   uart_putuint(g_c_SW);
     uart_puts(" SWR=");  uart_putuint(g_i_SWR);
     uart_puts(" AUTO="); uart_putuint(g_b_Auto_mode);
-    uart_puts(" SLOTS=");uart_putuint(eeprom_read(EEPROM_BAND_COUNT));
+    uart_puts(" SLOTS="); uart_putuint(EEPROM_BAND_SLOT_COUNT);
+    uart_puts(" SAVED="); uart_putuint(g_b_slot_saved);
     uart_puts("\r\n");
 }
 
@@ -1422,47 +1425,77 @@ static unsigned char parse_hex8(const char *s)
     return (unsigned char)((l_hi << 4) | l_lo);
 }
 
-/* Find a freq-tagged slot within EEPROM_BAND_FREQ_TOL of l_freq.
-   If found: apply relays, load stored SWR into g_i_SWR, return 1.
-   Returns  0 if no matching slot.
-   No live SWR measurement — safe to call in RX (no TX power present). */
-static signed char band_slot_apply_freq(unsigned char l_freq)
+static unsigned int parse_hex16(const char *s)
 {
-    unsigned char l_slot, l_base, l_slot_ind, l_count, l_slot_freq, l_diff;
-    if (l_freq == 0) return 0;
-    l_count = eeprom_read(EEPROM_BAND_COUNT);
-    if (l_count < 1 || l_count > EEPROM_BAND_SLOT_COUNT) return 0;
-    for (l_slot = 0; l_slot < l_count; l_slot++) {
-        l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_slot * EEPROM_BAND_SLOT_STRIDE);
-        l_slot_ind = eeprom_read(l_base + 1);
-        if (l_slot_ind == 0xFF) continue;
-        l_slot_freq = eeprom_read(l_base);
-        if (l_slot_freq == 0) continue;
-        l_diff = (l_slot_freq > l_freq) ? (unsigned char)(l_slot_freq - l_freq)
-                                        : (unsigned char)(l_freq - l_slot_freq);
-        if (l_diff > EEPROM_BAND_FREQ_TOL) continue;
-        g_c_ind = l_slot_ind;
-        g_c_cap = eeprom_read(l_base + 2);
-        g_c_SW  = (char)(eeprom_read(l_base + 3) & 1u);
-        set_ind(g_c_ind);
-        set_cap(g_c_cap);
-        set_sw(g_c_SW);
-        g_i_SWR = (int)eeprom_read(l_base + 4) * 10;
-        return 1;
+    unsigned int  l_val = 0;
+    unsigned char l_i, l_d;
+    for (l_i = 0; l_i < 4u; l_i++) {
+        if (s[l_i] >= '0' && s[l_i] <= '9')      l_d = (unsigned char)(s[l_i] - '0');
+        else if (s[l_i] >= 'a' && s[l_i] <= 'f') l_d = (unsigned char)(s[l_i] - 'a' + 10u);
+        else if (s[l_i] >= 'A' && s[l_i] <= 'F') l_d = (unsigned char)(s[l_i] - 'A' + 10u);
+        else return 0;
+        l_val = (unsigned int)((l_val << 4) | (unsigned int)l_d);
     }
-    return 0;
+    return l_val;
+}
+
+static void uart_puthex16(unsigned int v)
+{
+    uart_puthex8((unsigned char)(v >> 8));
+    uart_puthex8((unsigned char)(v & 0xFFu));
+}
+
+/* Find best-matching sub-slot within the current band for l_freq_kHz.
+   If found: apply relays, load stored SWR, return 1. Return 0 if no match.
+   No live SWR measurement — safe to call in RX (no TX power present). */
+static signed char band_slot_apply_freq(unsigned int l_freq_kHz)
+{
+    unsigned char l_band, l_sub, l_slot_idx, l_base, l_ind, l_sw_swr;
+    unsigned int  l_sf, l_diff, l_best_diff;
+    unsigned char l_best_sub;
+    if (l_freq_kHz == 0) return 0;
+    l_band = freq_to_band_idx(l_freq_kHz);
+    if (l_band == 0xFF) return 0;
+    l_best_diff = 0xFFFFu;
+    l_best_sub  = 0xFF;
+    for (l_sub = 0; l_sub < (unsigned char)EEPROM_BAND_SUB_N; l_sub++) {
+        l_slot_idx = (unsigned char)(l_band * (unsigned char)EEPROM_BAND_SUB_N + l_sub);
+        l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_slot_idx * (unsigned char)EEPROM_BAND_SLOT_STRIDE);
+        l_ind = eeprom_read(l_base + EEPROM_SLOT_IND);
+        if (l_ind == 0xFF) continue;
+        l_sf = (unsigned int)eeprom_read(l_base + EEPROM_SLOT_FREQ_LO)
+             | ((unsigned int)eeprom_read(l_base + EEPROM_SLOT_FREQ_HI) << 8);
+        if (l_sf == 0) continue;
+        l_diff = (l_sf > l_freq_kHz) ? (unsigned int)(l_sf - l_freq_kHz)
+                                      : (unsigned int)(l_freq_kHz - l_sf);
+        if (l_diff < l_best_diff) { l_best_diff = l_diff; l_best_sub = l_sub; }
+    }
+    if (l_best_sub == 0xFF) return 0;
+    l_slot_idx = (unsigned char)(l_band * (unsigned char)EEPROM_BAND_SUB_N + l_best_sub);
+    l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_slot_idx * (unsigned char)EEPROM_BAND_SLOT_STRIDE);
+    l_ind    = eeprom_read(l_base + EEPROM_SLOT_IND);
+    l_sw_swr = eeprom_read(l_base + EEPROM_SLOT_SW_SWR);
+    g_c_ind = (char)l_ind;
+    g_c_cap = (char)eeprom_read(l_base + EEPROM_SLOT_CAP);
+    g_c_SW  = (char)((l_sw_swr >> 7) & 1u);
+    set_ind(g_c_ind);
+    set_cap(g_c_cap);
+    set_sw(g_c_SW);
+    g_i_SWR = (int)(l_sw_swr & 0x7Fu) * 10;
+    return 1;
 }
 
 static void uart_exec_cmd(const char *l_cmd, unsigned char l_len)
 {
     if (l_cmd[0] == 't') {
-        if (l_len >= 4u) g_c_uart_freq_hint = parse_hex8(l_cmd + 2);
+        /* "t HHHH" — tune; optional 4-digit kHz freq hint in hex e.g. "t 1BA2" */
+        g_i_uart_freq_hint = (l_len >= 6u) ? parse_hex16(l_cmd + 2) : 0;
         tune();
         uart_send_status();
-    } else if (l_cmd[0] == 'l' && l_len >= 4u) {
-        /* "l HH" — recall slot by freq_enc, apply relays, report result */
-        unsigned char l_freq = parse_hex8(l_cmd + 2);
-        signed char l_result = band_slot_apply_freq(l_freq);
+    } else if (l_cmd[0] == 'l' && l_len >= 6u) {
+        /* "l HHHH" — recall nearest slot for freq in kHz, apply relays, report */
+        unsigned int  l_freq_kHz = parse_hex16(l_cmd + 2);
+        signed char l_result = band_slot_apply_freq(l_freq_kHz);
         if (l_result == 1) {
             uart_puts("RECALL IND="); uart_putuint(g_c_ind);
             uart_puts(" CAP=");       uart_putuint(g_c_cap);
@@ -1473,26 +1506,26 @@ static void uart_exec_cmd(const char *l_cmd, unsigned char l_len)
             uart_puts("NOMATCH\r\n");
         }
     } else if (l_cmd[0] == 'm') {
-        /* "m" — dump all band slots */
-        unsigned char l_slot, l_base, l_ind, l_count;
-        l_count = eeprom_read(EEPROM_BAND_COUNT);
-        if (l_count < 1 || l_count > EEPROM_BAND_SLOT_COUNT) {
-            uart_puts("SLOTS=0\r\n");
-        } else {
-            for (l_slot = 0; l_slot < l_count; l_slot++) {
-                l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_slot * EEPROM_BAND_SLOT_STRIDE);
-                l_ind = eeprom_read(l_base + 1);
-                uart_puts("SLOT "); uart_putuint(l_slot);
-                if (l_ind == 0xFF) {
-                    uart_puts(" EMPTY\r\n");
-                } else {
-                    uart_puts(" FREQ=0x"); uart_puthex8(eeprom_read(l_base));
-                    uart_puts(" IND=");    uart_putuint(l_ind);
-                    uart_puts(" CAP=");    uart_putuint(eeprom_read(l_base + 2));
-                    uart_puts(" SW=");     uart_putuint(eeprom_read(l_base + 3) & 1u);
-                    uart_puts(" SWR=");    uart_putuint((int)eeprom_read(l_base + 4) * 10);
-                    uart_puts("\r\n");
-                }
+        /* "m" — dump all 30 band sub-slots (10 bands × 3) */
+        unsigned char l_slot, l_base, l_ind, l_sw_swr;
+        unsigned int  l_sf;
+        for (l_slot = 0; l_slot < (unsigned char)EEPROM_BAND_SLOT_COUNT; l_slot++) {
+            CLRWDT();   /* 30 slots × ~41ms bit-bang = ~1.2s > WDT 1024ms */
+            l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_slot * (unsigned char)EEPROM_BAND_SLOT_STRIDE);
+            l_ind = eeprom_read(l_base + EEPROM_SLOT_IND);
+            uart_puts("SLOT "); uart_putuint(l_slot);
+            if (l_ind == 0xFF) {
+                uart_puts(" EMPTY\r\n");
+            } else {
+                l_sf = (unsigned int)eeprom_read(l_base + EEPROM_SLOT_FREQ_LO)
+                     | ((unsigned int)eeprom_read(l_base + EEPROM_SLOT_FREQ_HI) << 8);
+                l_sw_swr = eeprom_read(l_base + EEPROM_SLOT_SW_SWR);
+                uart_puts(" FREQ=0x"); uart_puthex16(l_sf);
+                uart_puts(" IND=");    uart_putuint(l_ind);
+                uart_puts(" CAP=");    uart_putuint(eeprom_read(l_base + EEPROM_SLOT_CAP));
+                uart_puts(" SW=");     uart_putuint((l_sw_swr >> 7) & 1u);
+                uart_puts(" SWR=");    uart_putuint((int)(l_sw_swr & 0x7Fu) * 10);
+                uart_puts("\r\n");
             }
         }
     } else if (l_cmd[0] == 'e' && l_len >= 4u) {

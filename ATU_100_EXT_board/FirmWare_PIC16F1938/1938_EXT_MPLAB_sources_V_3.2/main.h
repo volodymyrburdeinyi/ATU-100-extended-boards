@@ -6,7 +6,7 @@
 // ATU-100 project 2016
 
 //
-static char g_c_ind = 0, g_c_cap = 0;
+static unsigned char g_c_ind = 0, g_c_cap = 0;
 static char g_c_SW = 0;
 static char g_c_step_cap = 0, g_c_step_ind = 0;
 static char g_c_L_mult = 1, g_c_C_mult = 1; 
@@ -236,7 +236,7 @@ void get_swr()
    }
    if (g_i_PWR >= e_i_watts_min_for_start)
       g_b_tx_seen = 1;
-   while ((g_i_PWR < e_i_watts_min_for_start) | (g_i_PWR > e_i_watts_max_for_start & e_i_watts_max_for_start > 0))
+   while ((g_i_PWR < e_i_watts_min_for_start) || (g_i_PWR > e_i_watts_max_for_start && e_i_watts_max_for_start > 0))
    { // waiting for good power
       if (g_b_tx_seen == 1)
       { // TX was active, power dropped — QMX+ inhibit, abort gracefully
@@ -260,7 +260,7 @@ void get_swr()
       //
       if (Button(&PORTB, TUNE_BUTTON, 5, BUTTON_RELEASED))
          g_b_rready = 1;
-      if ((g_b_rready == 1) & Button(&PORTB, TUNE_BUTTON, 5, BUTTON_PRESSED))
+      if ((g_b_rready == 1) && Button(&PORTB, TUNE_BUTTON, 5, BUTTON_PRESSED))
       { //  press button  Tune
          show_reset();
          g_i_SWR = 0;
@@ -270,7 +270,7 @@ void get_swr()
    return;
 }
 
-void set_ind(char Ind)
+void set_ind(unsigned char Ind)
 {
    charbits Indbits;
    Indbits.bytes = Ind;
@@ -300,7 +300,7 @@ void set_ind(char Ind)
    Vdelay_ms(e_i_ms_Rel_Del);
 }
 
-void set_cap(char Cap)
+void set_cap(unsigned char Cap)
 {
    charbits Capbits;
    Capbits.bytes = Cap;
@@ -316,9 +316,9 @@ void set_cap(char Cap)
    Vdelay_ms(e_i_ms_Rel_Del);
 }
 
-void set_sw(char g_c_SW)
+void set_sw(char l_sw)
 { // 0 - IN,  1 - OUT
-   Cap_sw = g_c_SW;
+   Cap_sw = l_sw;
    Vdelay_ms(e_i_ms_Rel_Del);
 }
 
@@ -333,8 +333,8 @@ void atu_reset()
 
 void coarse_cap()
 {
-   char l_coarse_cap_step = 3;
-   char l_coarse_cap_count;
+   unsigned char l_coarse_cap_step = 3;
+   unsigned char l_coarse_cap_count;
    int l_coarse_cap_min_swr;
 
    g_c_cap = 0;
@@ -359,9 +359,9 @@ void coarse_cap()
             break;
       }
       l_coarse_cap_count += l_coarse_cap_step;
-      if (e_c_b_C_linear == 0 & l_coarse_cap_count == 9)
+      if (e_c_b_C_linear == 0 && l_coarse_cap_count == 9)
          l_coarse_cap_count = 8;
-      else if (e_c_b_C_linear == 0 & l_coarse_cap_count == 17)
+      else if (e_c_b_C_linear == 0 && l_coarse_cap_count == 17)
       {
          l_coarse_cap_count = 16;
          l_coarse_cap_step = 4;
@@ -373,9 +373,9 @@ void coarse_cap()
 
 void coarse_tune()
 {
-   char l_coarse_tune_step = 3;
-   char l_coarse_tune_count;
-   char l_coarse_tune_mem_cap, l_coarse_tune_mem_step_cap;
+   unsigned char l_coarse_tune_step = 3;
+   unsigned char l_coarse_tune_count;
+   unsigned char l_coarse_tune_mem_cap, l_coarse_tune_mem_step_cap;
    int l_coarse_tune_min_swr;
 
    l_coarse_tune_mem_cap = 0;
@@ -400,9 +400,9 @@ void coarse_tune()
             break;
       }
       l_coarse_tune_count += l_coarse_tune_step;
-      if (e_c_b_L_linear == 0 & l_coarse_tune_count == 9)
+      if (e_c_b_L_linear == 0 && l_coarse_tune_count == 9)
          l_coarse_tune_count = 8;
-      else if (e_c_b_L_linear == 0 & l_coarse_tune_count == 17)
+      else if (e_c_b_L_linear == 0 && l_coarse_tune_count == 17)
       {
          l_coarse_tune_count = 16;
          l_coarse_tune_step = 4;
@@ -418,7 +418,7 @@ void coarse_tune()
 
 void sharp_cap()
 {
-   char l_sharp_cap_range, l_sharp_cap_count, l_sharp_cap_max_range, l_sharp_cap_min_range;
+   unsigned char l_sharp_cap_range, l_sharp_cap_count, l_sharp_cap_max_range, l_sharp_cap_min_range;
    int l_sharp_cap_min_SWR;
    l_sharp_cap_range = g_c_step_cap * g_c_C_mult;
    //
@@ -467,7 +467,7 @@ void sharp_cap()
 
 void sharp_ind()
 {
-   char l_sharp_ind_range, l_sharp_ind_count, l_sharp_ind_max_range, l_sharp_ind_min_range;
+   unsigned char l_sharp_ind_range, l_sharp_ind_count, l_sharp_ind_max_range, l_sharp_ind_min_range;
    int l_sharp_ind_min_SWR;
    l_sharp_ind_range = g_c_step_ind * g_c_L_mult;
    //
@@ -514,40 +514,34 @@ void sharp_ind()
    return;
 }
 
+/* Returns 1 if sub_tune() should return (TX-inhibit abort or SWR already good),
+   0 if the SW-position experiment should proceed. */
+static char tune_pass(void)
+{
+   coarse_tune();
+   if (g_i_SWR == 0) { atu_reset(); return 1; }
+   get_swr();
+   if (g_i_SWR < 120) return 1;
+   sharp_ind();
+   if (g_i_SWR == 0) { atu_reset(); return 1; }
+   get_swr();
+   if (g_i_SWR < 120) return 1;
+   sharp_cap();
+   if (g_i_SWR == 0) { atu_reset(); return 1; }
+   get_swr();
+   if (g_i_SWR < 120) return 1;
+   return 0;
+}
+
 void sub_tune()
 {
-   int l_int_swr_mem, l_int_ind_mem, l_int_cap_mem;
+   int l_int_swr_mem;
+   unsigned char l_int_ind_mem, l_int_cap_mem;
    //
    l_int_swr_mem = g_i_SWR;
-   coarse_tune();
-   if (g_i_SWR == 0)
-   {
-      atu_reset();
-      return;
-   }
-   get_swr();
-   if (g_i_SWR < 120)
-      return;
-   sharp_ind();
-   if (g_i_SWR == 0)
-   {
-      atu_reset();
-      return;
-   }
-   get_swr();
-   if (g_i_SWR < 120)
-      return;
-   sharp_cap();
-   if (g_i_SWR == 0)
-   {
-      atu_reset();
-      return;
-   }
-   get_swr();
-   if (g_i_SWR < 120)
-      return;
+   if (tune_pass()) return;
    //
-   if (g_i_SWR < 200 & g_i_SWR<l_int_swr_mem &(l_int_swr_mem - g_i_SWR)> 100)
+   if (g_i_SWR < 200 && g_i_SWR < l_int_swr_mem && (l_int_swr_mem - g_i_SWR) > 100)
       return;
    l_int_swr_mem = g_i_SWR;
    l_int_ind_mem = g_c_ind;
@@ -564,33 +558,7 @@ void sub_tune()
    if (g_i_SWR < 120)
       return;
    //
-   coarse_tune();
-   if (g_i_SWR == 0)
-   {
-      atu_reset();
-      return;
-   }
-   get_swr();
-   if (g_i_SWR < 120)
-      return;
-   sharp_ind();
-   if (g_i_SWR == 0)
-   {
-      atu_reset();
-      return;
-   }
-   get_swr();
-   if (g_i_SWR < 120)
-      return;
-   sharp_cap();
-   if (g_i_SWR == 0)
-   {
-      atu_reset();
-      return;
-   }
-   get_swr();
-   if (g_i_SWR < 120)
-      return;
+   if (tune_pass()) return;
    //
    if (g_i_SWR > l_int_swr_mem)
    {
@@ -599,8 +567,8 @@ void sub_tune()
       else
          g_c_SW = 1;
       set_sw(g_c_SW);
-      g_c_ind = (char)(l_int_ind_mem);
-      g_c_cap = (char)(l_int_cap_mem);
+      g_c_ind = l_int_ind_mem;
+      g_c_cap = l_int_cap_mem;
       set_ind(g_c_ind);
       set_cap(g_c_cap);
       get_swr();
@@ -610,59 +578,81 @@ void sub_tune()
    return;
 }
 
-static unsigned char measure_freq(void) {
+static unsigned int measure_freq(void) {
    return 0;   /* replaced when 74HC4060 hardware is wired to RD0 */
 }
 
-static void band_slot_save(char l_probe_matched, unsigned char l_freq)
+/* Band lo/hi in kHz: 160m 80m 40m 30m 20m 17m 15m 12m 10m 6m */
+static const unsigned int BAND_LO[10] = {1800, 3500, 7000, 10100, 14000, 18068, 21000, 24890, 28000, 50000};
+static const unsigned int BAND_HI[10] = {2000, 4000, 7300, 10150, 14350, 18168, 21450, 24990, 29700, 54000};
+
+static unsigned char freq_to_band_idx(unsigned int kHz)
 {
-   unsigned char l_ptr, l_base, l_count;
-   unsigned char l_slot, l_sf, l_si, l_d, l_existing;
+   unsigned char l_b;
+   for (l_b = 0; l_b < (unsigned char)EEPROM_BAND_N; l_b++)
+      if (kHz >= BAND_LO[l_b] && kHz <= BAND_HI[l_b]) return l_b;
+   return 0xFF;
+}
+
+static void band_slot_save(char l_probe_matched, unsigned int l_freq_kHz)
+{
+   unsigned char l_band, l_sub, l_slot_idx, l_base, l_ind, l_sw_swr, l_swr10;
+   unsigned int  l_sf, l_diff;
+   unsigned char l_existing_sub, l_empty_sub, l_worst_sub, l_worst_swr;
    if (l_probe_matched) return;
    if (g_char_tune_effort <= EEPROM_BAND_EFFORT_THR) return;
    if (g_i_SWR == 0 || g_i_SWR >= 150) return;
-   l_count = eeprom_read(EEPROM_BAND_COUNT);
-   if (l_count < 1 || l_count > EEPROM_BAND_SLOT_COUNT) return;
-   /* Search for an existing slot matching l_freq — update in place rather than
-      blindly advancing the circular pointer into another band's slot. */
-   l_existing = 0xFF;
-   for (l_slot = 0; l_slot < l_count; l_slot++) {
-      l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_slot * EEPROM_BAND_SLOT_STRIDE);
-      l_si = eeprom_read(l_base + 1);
-      if (l_si == 0xFF) continue;
-      l_sf = eeprom_read(l_base);
-      if (l_sf == 0) continue;
-      l_d = (l_sf > l_freq) ? (unsigned char)(l_sf - l_freq)
-                             : (unsigned char)(l_freq - l_sf);
-      if (l_d <= EEPROM_BAND_FREQ_TOL) { l_existing = l_slot; break; }
+   if (l_freq_kHz == 0) return;
+   l_band = freq_to_band_idx(l_freq_kHz);
+   if (l_band == 0xFF) return;
+   l_existing_sub = 0xFF;
+   l_empty_sub    = 0xFF;
+   l_worst_sub    = 0;
+   l_worst_swr    = 0;
+   for (l_sub = 0; l_sub < (unsigned char)EEPROM_BAND_SUB_N; l_sub++) {
+      l_slot_idx = (unsigned char)(l_band * (unsigned char)EEPROM_BAND_SUB_N + l_sub);
+      l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_slot_idx * (unsigned char)EEPROM_BAND_SLOT_STRIDE);
+      l_ind = eeprom_read(l_base + EEPROM_SLOT_IND);
+      if (l_ind == 0xFF) { if (l_empty_sub == 0xFF) l_empty_sub = l_sub; continue; }
+      l_sf = (unsigned int)eeprom_read(l_base + EEPROM_SLOT_FREQ_LO)
+           | ((unsigned int)eeprom_read(l_base + EEPROM_SLOT_FREQ_HI) << 8);
+      if (l_sf == 0) { if (l_empty_sub == 0xFF) l_empty_sub = l_sub; continue; }
+      l_diff = (l_sf > l_freq_kHz) ? (unsigned int)(l_sf - l_freq_kHz)
+                                    : (unsigned int)(l_freq_kHz - l_sf);
+      if (l_diff <= (unsigned int)EEPROM_BAND_FREQ_TOL_KHZ) { l_existing_sub = l_sub; break; }
+      l_sw_swr = eeprom_read(l_base + EEPROM_SLOT_SW_SWR);
+      l_swr10  = (unsigned char)(l_sw_swr & 0x7Fu);
+      if (l_swr10 > l_worst_swr) { l_worst_swr = l_swr10; l_worst_sub = l_sub; }
    }
-   if (l_existing != 0xFF) {
-      l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_existing * EEPROM_BAND_SLOT_STRIDE);
-   } else {
-      l_ptr = eeprom_read(EEPROM_BAND_PTR);
-      if (l_ptr >= l_count) l_ptr = 0;
-      l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_ptr * EEPROM_BAND_SLOT_STRIDE);
-      l_ptr++;
-      if (l_ptr >= l_count) l_ptr = 0;
-      eeprom_write(EEPROM_BAND_PTR, l_ptr);
-   }
-   eeprom_write(l_base,     l_freq);
-   eeprom_write(l_base + 1, g_c_ind);
-   eeprom_write(l_base + 2, g_c_cap);
-   eeprom_write(l_base + 3, (unsigned char)(g_c_SW & 1u));
-   eeprom_write(l_base + 4, (char)(g_i_SWR / 10));
+   if (l_existing_sub != 0xFF)   l_sub = l_existing_sub;
+   else if (l_empty_sub != 0xFF) l_sub = l_empty_sub;
+   else                          l_sub = l_worst_sub;
+   l_slot_idx = (unsigned char)(l_band * (unsigned char)EEPROM_BAND_SUB_N + l_sub);
+   l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_slot_idx * (unsigned char)EEPROM_BAND_SLOT_STRIDE);
+   l_swr10 = (unsigned char)(g_i_SWR / 10);
+   if (l_swr10 > 127) l_swr10 = 127;
+   /* write IND last — it doubles as the commit byte (0xFF = empty sentinel).
+      If power fails before IND is written, the slot stays empty and is safe to reuse. */
+   eeprom_write(l_base + EEPROM_SLOT_FREQ_LO, (unsigned char)(l_freq_kHz & 0xFFu));
+   eeprom_write(l_base + EEPROM_SLOT_FREQ_HI, (unsigned char)(l_freq_kHz >> 8));
+   eeprom_write(l_base + EEPROM_SLOT_CAP,     (unsigned char)g_c_cap);
+   eeprom_write(l_base + EEPROM_SLOT_SW_SWR,  (unsigned char)(((unsigned char)(g_c_SW & 1u) << 7) | l_swr10));
+   eeprom_write(l_base + EEPROM_SLOT_IND,     (unsigned char)g_c_ind);
+   g_b_slot_saved = 1;
 }
 
 void tune()
 {
-   char l_tune_ind_mem, l_tune_cap_mem, l_tune_sw_mem;
-   unsigned char l_freq;
+   unsigned char l_tune_ind_mem, l_tune_cap_mem;
+   char l_tune_sw_mem;
+   unsigned int l_freq_kHz;
    char l_probe_matched = 0;
    CLRWDT();
    //
    g_char_p_cnt = 0;
    g_i_P_max = 0;
    g_char_tune_effort = 0;
+   g_b_slot_saved = 0;
    //
    g_b_rready = 0;
    g_b_tx_seen = 0;
@@ -672,68 +662,51 @@ void tune()
    get_swr();
    if (g_i_SWR < 110)
       return;
-   l_freq = measure_freq();
+   l_freq_kHz = measure_freq();
 #ifdef UART
-   if (l_freq == 0 && g_c_uart_freq_hint != 0) { l_freq = g_c_uart_freq_hint; g_c_uart_freq_hint = 0; }
+   if (l_freq_kHz == 0 && g_i_uart_freq_hint != 0) { l_freq_kHz = g_i_uart_freq_hint; g_i_uart_freq_hint = 0; }
 #endif
-   // probe band memory slots before committing to full tune
-   // Phase A (when l_freq > 0): try freq-tagged slots within EEPROM_BAND_FREQ_TOL
-   // Phase B: try untagged slots; skip freq-tagged slots already covered by Phase A
+   /* probe band memory: search the 3 sub-slots for the current band */
+   if (l_freq_kHz > 0)
    {
-      unsigned char l_slot, l_base, l_slot_ind, l_count;
-      unsigned char l_phase, l_slot_freq, l_diff;
-      l_count = eeprom_read(EEPROM_BAND_COUNT);
-      if (l_count >= 1 && l_count <= EEPROM_BAND_SLOT_COUNT)
+      unsigned char l_band_idx = freq_to_band_idx(l_freq_kHz);
+      if (l_band_idx != 0xFF)
       {
-         for (l_phase = (l_freq > 0) ? 0u : 1u; l_phase <= 1u; l_phase++)
+         unsigned char l_sub, l_slot_idx, l_base, l_ind, l_sw_swr;
+         unsigned int  l_sf, l_diff;
+         for (l_sub = 0; l_sub < (unsigned char)EEPROM_BAND_SUB_N; l_sub++)
          {
-            for (l_slot = 0; l_slot < l_count; l_slot++)
+            l_slot_idx = (unsigned char)(l_band_idx * (unsigned char)EEPROM_BAND_SUB_N + l_sub);
+            l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_slot_idx * (unsigned char)EEPROM_BAND_SLOT_STRIDE);
+            l_ind = eeprom_read(l_base + EEPROM_SLOT_IND);
+            if (l_ind == 0xFF) continue;
+            l_sf = (unsigned int)eeprom_read(l_base + EEPROM_SLOT_FREQ_LO)
+                 | ((unsigned int)eeprom_read(l_base + EEPROM_SLOT_FREQ_HI) << 8);
+            if (l_sf == 0) continue;
+            l_diff = (l_sf > l_freq_kHz) ? (unsigned int)(l_sf - l_freq_kHz)
+                                          : (unsigned int)(l_freq_kHz - l_sf);
+            if (l_diff > (unsigned int)EEPROM_BAND_FREQ_TOL_KHZ) continue;
+            g_c_ind = l_ind;
+            g_c_cap = eeprom_read(l_base + EEPROM_SLOT_CAP);
+            l_sw_swr = eeprom_read(l_base + EEPROM_SLOT_SW_SWR);
+            g_c_SW = (char)((l_sw_swr >> 7) & 1u);
+            set_ind(g_c_ind);
+            set_cap(g_c_cap);
+            set_sw(g_c_SW);
+            get_swr();
+            if (g_i_SWR == 0)
             {
-               l_base = EEPROM_BAND_SLOT_0
-                      + (unsigned char)(l_slot * EEPROM_BAND_SLOT_STRIDE);
-               l_slot_ind = eeprom_read(l_base + 1);
-               if (l_slot_ind == 0xFF)
-                  continue;
-               l_slot_freq = eeprom_read(l_base);
-               if (l_phase == 0u)
-               {
-                  if (l_slot_freq == 0)
-                     continue;
-                  /* larger-minus-smaller is always non-negative (both unsigned char) */
-                  l_diff = (l_slot_freq > l_freq)
-                         ? (unsigned char)(l_slot_freq - l_freq)
-                         : (unsigned char)(l_freq - l_slot_freq);
-                  if (l_diff > EEPROM_BAND_FREQ_TOL)
-                     continue;
-               }
-               else
-               {
-                  /* skip freq-tagged slots when we have a measured freq —
-                   * they were tried in Phase A; wrong-band slots would fail anyway */
-                  if (l_slot_freq > 0 && l_freq > 0)
-                     continue;
-               }
-               g_c_ind = l_slot_ind;
-               g_c_cap = eeprom_read(l_base + 2);
-               g_c_SW  = eeprom_read(l_base + 3) & 1u;
-               set_ind(g_c_ind);
-               set_cap(g_c_cap);
-               set_sw(g_c_SW);
-               get_swr();
-               if (g_i_SWR == 0)
-               {
-                  g_c_ind = l_tune_ind_mem; g_c_cap = l_tune_cap_mem; g_c_SW = l_tune_sw_mem;
-                  set_ind(g_c_ind); set_cap(g_c_cap); set_sw(g_c_SW);
-                  return;
-               }
-               if (g_i_SWR < 150)
-               {
-                  l_probe_matched = 1;
-                  return;
-               }
+               g_c_ind = l_tune_ind_mem; g_c_cap = l_tune_cap_mem; g_c_SW = l_tune_sw_mem;
+               set_ind(g_c_ind); set_cap(g_c_cap); set_sw(g_c_SW);
+               return;
+            }
+            if (g_i_SWR < 150)
+            {
+               l_probe_matched = 1;
+               return;
             }
          }
-         // no slot matched — reset SW before full tune
+         /* no sub-slot matched — reset SW before full tune */
          g_c_SW = 0;
          set_sw(g_c_SW);
       }
@@ -757,7 +730,7 @@ void tune()
    }
    if (g_i_SWR < 110)
       return;
-   if (e_i_tenths_init_max_swr > 110 & g_i_SWR > e_i_tenths_init_max_swr)
+   if (e_i_tenths_init_max_swr > 110 && g_i_SWR > e_i_tenths_init_max_swr)
       return;
    //
    sub_tune();
@@ -773,12 +746,12 @@ void tune()
    }
    if (g_i_SWR < 120)
    {
-      band_slot_save(l_probe_matched, l_freq);
+      band_slot_save(l_probe_matched, l_freq_kHz);
       return;
    }
-   if (e_c_num_C_q == 5 & e_c_num_L_q == 5)
+   if (e_c_num_C_q == 5 && e_c_num_L_q == 5)
    {
-      band_slot_save(l_probe_matched, l_freq);
+      band_slot_save(l_probe_matched, l_freq_kHz);
       return;
    }
 
@@ -800,7 +773,7 @@ void tune()
    }
    if (g_i_SWR < 120)
    {
-      band_slot_save(l_probe_matched, l_freq);
+      band_slot_save(l_probe_matched, l_freq_kHz);
       return;
    }
    if (e_c_num_C_q > 5)
@@ -831,7 +804,7 @@ void tune()
       g_c_C_mult = 2;
    else if (e_c_num_C_q == 7)
       g_c_C_mult = 4;
-   band_slot_save(l_probe_matched, l_freq);
+   band_slot_save(l_probe_matched, l_freq_kHz);
    CLRWDT();
    return;
 }
