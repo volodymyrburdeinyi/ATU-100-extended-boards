@@ -1382,6 +1382,7 @@ void show_loss(void)
 
 unsigned int  g_i_uart_freq_hint = 0;
 unsigned char g_b_slot_saved     = 0;
+unsigned char g_c_tune_exit      = 0;   /* set to exit-path code by tune() for diagnostics */
 
 static void uart_putuint(int v)
 {
@@ -1409,6 +1410,7 @@ static void uart_send_status(void)
     uart_puts(" EFF=");   uart_putuint(g_char_tune_effort);
     uart_puts(" SLOTS="); uart_putuint(EEPROM_BAND_SLOT_COUNT);
     uart_puts(" SAVED="); uart_putuint(g_b_slot_saved);
+    uart_puts(" EXIT=");  uart_putuint(g_c_tune_exit);
     uart_puts("\r\n");
 }
 

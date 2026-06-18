@@ -212,6 +212,8 @@ void debugprint(void);
     extern unsigned int  g_i_uart_freq_hint;
     /* set to 1 by band_slot_save() when an EEPROM write occurs; cleared at tune() start */
     extern unsigned char g_b_slot_saved;
+    /* exit-path code set by tune() — cleared at tune() start, shown in uart_send_status */
+    extern unsigned char g_c_tune_exit;
 #endif
 
     void IntToStr(int number, char *output);

@@ -514,32 +514,25 @@ void sharp_ind()
    return;
 }
 
-/* Returns 1 if sub_tune() should return (TX-inhibit abort or SWR already good),
-   0 if the SW-position experiment should proceed. */
-static char tune_pass(void)
-{
-   coarse_tune();
-   if (g_i_SWR == 0) { atu_reset(); return 1; }
-   get_swr();
-   if (g_i_SWR < 120) return 1;
-   sharp_ind();
-   if (g_i_SWR == 0) { atu_reset(); return 1; }
-   get_swr();
-   if (g_i_SWR < 120) return 1;
-   sharp_cap();
-   if (g_i_SWR == 0) { atu_reset(); return 1; }
-   get_swr();
-   if (g_i_SWR < 120) return 1;
-   return 0;
-}
-
 void sub_tune()
 {
    int l_int_swr_mem;
    unsigned char l_int_ind_mem, l_int_cap_mem;
    //
    l_int_swr_mem = g_i_SWR;
-   if (tune_pass()) return;
+   /* pass 1 — SW at current position */
+   coarse_tune();
+   if (g_i_SWR == 0) { atu_reset(); return; }
+   get_swr();
+   if (g_i_SWR < 120) return;
+   sharp_ind();
+   if (g_i_SWR == 0) { atu_reset(); return; }
+   get_swr();
+   if (g_i_SWR < 120) return;
+   sharp_cap();
+   if (g_i_SWR == 0) { atu_reset(); return; }
+   get_swr();
+   if (g_i_SWR < 120) return;
    //
    if (g_i_SWR < 200 && g_i_SWR < l_int_swr_mem && (l_int_swr_mem - g_i_SWR) > 100)
       return;
@@ -557,8 +550,19 @@ void sub_tune()
    get_swr();
    if (g_i_SWR < 120)
       return;
-   //
-   if (tune_pass()) return;
+   /* pass 2 — SW at opposite position */
+   coarse_tune();
+   if (g_i_SWR == 0) { atu_reset(); return; }
+   get_swr();
+   if (g_i_SWR < 120) return;
+   sharp_ind();
+   if (g_i_SWR == 0) { atu_reset(); return; }
+   get_swr();
+   if (g_i_SWR < 120) return;
+   sharp_cap();
+   if (g_i_SWR == 0) { atu_reset(); return; }
+   get_swr();
+   if (g_i_SWR < 120) return;
    //
    if (g_i_SWR > l_int_swr_mem)
    {
@@ -652,6 +656,7 @@ void tune()
    g_i_P_max = 0;
    g_char_tune_effort = 0;
    g_b_slot_saved = 0;
+   g_c_tune_exit  = 0;
    //
    g_b_rready = 0;
    g_b_tx_seen = 0;
@@ -665,6 +670,7 @@ void tune()
    get_swr();
    if (g_i_SWR < 110)
    {
+      g_c_tune_exit = 1;
       band_slot_save(l_probe_matched, l_freq_kHz);
       return;
    }
@@ -698,13 +704,20 @@ void tune()
             get_swr();
             if (g_i_SWR == 0)
             {
+               g_c_tune_exit = 2;
                g_c_ind = l_tune_ind_mem; g_c_cap = l_tune_cap_mem; g_c_SW = l_tune_sw_mem;
                set_ind(g_c_ind); set_cap(g_c_cap); set_sw(g_c_SW);
                return;
             }
             if (g_i_SWR < 150)
             {
-               l_probe_matched = 1;
+               /* upsert: overwrite stored SWR only when current measurement improved */
+               unsigned char l_stored_swr10 = l_sw_swr & 0x7Fu;
+               g_c_tune_exit = 3;
+               if (g_i_SWR > 0 && (unsigned char)((unsigned int)g_i_SWR / 10u) < l_stored_swr10)
+                  band_slot_save(0, l_freq_kHz);
+               else
+                  l_probe_matched = 1;
                return;
             }
          }
@@ -722,6 +735,7 @@ void tune()
    g_i_swr_a = g_i_SWR;
    if (g_i_SWR == 0)
    {
+      g_c_tune_exit = 4;
       g_c_ind = l_tune_ind_mem;
       g_c_cap = l_tune_cap_mem;
       g_c_SW  = l_tune_sw_mem;
@@ -731,13 +745,18 @@ void tune()
       return;
    }
    if (g_i_SWR < 110)
+   {
+      g_c_tune_exit = 5;
+      band_slot_save(l_probe_matched, l_freq_kHz);
       return;
+   }
    if (e_i_tenths_init_max_swr > 110 && g_i_SWR > e_i_tenths_init_max_swr)
-      return;
+   { g_c_tune_exit = 6; return; }
    //
    sub_tune();
    if (g_i_SWR == 0)
    {
+      g_c_tune_exit = 7;
       g_c_ind = l_tune_ind_mem;
       g_c_cap = l_tune_cap_mem;
       g_c_SW  = l_tune_sw_mem;
@@ -748,11 +767,13 @@ void tune()
    }
    if (g_i_SWR < 120)
    {
+      g_c_tune_exit = 8;
       band_slot_save(l_probe_matched, l_freq_kHz);
       return;
    }
    if (e_c_num_C_q == 5 && e_c_num_L_q == 5)
    {
+      g_c_tune_exit = 9;
       band_slot_save(l_probe_matched, l_freq_kHz);
       return;
    }
@@ -765,6 +786,7 @@ void tune()
    }
    if (g_i_SWR == 0)
    {
+      g_c_tune_exit = 10;
       g_c_ind = l_tune_ind_mem;
       g_c_cap = l_tune_cap_mem;
       g_c_SW  = l_tune_sw_mem;
@@ -775,6 +797,7 @@ void tune()
    }
    if (g_i_SWR < 120)
    {
+      g_c_tune_exit = 11;
       band_slot_save(l_probe_matched, l_freq_kHz);
       return;
    }
@@ -786,6 +809,7 @@ void tune()
    }
    if (g_i_SWR == 0)
    {
+      g_c_tune_exit = 12;
       g_c_ind = l_tune_ind_mem;
       g_c_cap = l_tune_cap_mem;
       g_c_SW  = l_tune_sw_mem;
@@ -807,6 +831,7 @@ void tune()
    else if (e_c_num_C_q == 7)
       g_c_C_mult = 4;
    get_swr();
+   g_c_tune_exit = 13;
    band_slot_save(l_probe_matched, l_freq_kHz);
    CLRWDT();
    return;
