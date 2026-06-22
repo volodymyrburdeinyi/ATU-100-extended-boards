@@ -271,6 +271,7 @@ st = {
     'event':            threading.Event(),
     'need_redraw':      threading.Event(),
     'pending_tune_khz': 0,   # set when recall hits NOMATCH during TX; tune fires on TX-end
+    'tuning':           False,  # True while serial_cmd is blocked waiting for tune response
 }
 lock       = threading.Lock()
 serial_sem = threading.Semaphore(1)   # one serial operation at a time
@@ -338,8 +339,22 @@ def _do_band(port, khz, force_tune=False):
                 return
 
         set_status(f'tuning {bnd}...')
-        t0   = time.monotonic()
-        resp = serial_cmd(fd, f't {khz:04x}', timeout=45.0)
+        t0 = time.monotonic()
+        try:
+            with lock:
+                st['tuning'] = True
+            resp = serial_cmd(fd, f't {khz:04x}', timeout=45.0)
+            # If aborted mid-tune, firmware sends 'OK ABORT\r\n' immediately then
+            # 'IND=...\r\n' after TS_ABORT completes. Consume both so the IND= line
+            # does not orphan in _response_queue.
+            if resp == 'OK ABORT':
+                try:
+                    resp = _response_queue.get(timeout=5.0)
+                except queue.Empty:
+                    resp = None
+        finally:
+            with lock:
+                st['tuning'] = False
         if resp is None:
             set_status(f'tune timeout after {time.monotonic()-t0:.0f}s')
             return
@@ -427,6 +442,23 @@ def udp_loop(sock, port):
             # happens before QMX+ SWR protection kicks in.
             # Full tune (if needed after NOMATCH) is deferred until TX ends.
             st['event'].set()
+        if not prev_tx and tx:
+            # TX just started — abort any in-progress tune so relays are not
+            # changed under live RF.
+            # Semaphore bypass: serial_cmd holds serial_sem while blocked on the
+            # response queue, so we cannot acquire it here. os.write on a Linux
+            # TTY fd is serialised by the kernel TTY spinlock — concurrent writes
+            # do not interleave bytes. If 'q\r' arrives before 't HHHH\r' (tiny
+            # race window between tuning=True and os.write in serial_cmd),
+            # tune_start() clears g_b_tune_abort so the subsequent tune is safe.
+            with lock:
+                tuning = st['tuning']
+                fd_abort = st['fd']
+            if tuning and fd_abort is not None:
+                try:
+                    os.write(fd_abort, b'q\r')
+                except OSError:
+                    pass
         if prev_tx and not tx:
             # TX just ended — fire pending tune or any deferred band change
             st['event'].set()

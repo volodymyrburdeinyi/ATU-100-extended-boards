@@ -49,6 +49,7 @@ any byte outside `0x20–0x7E`, so non-printable bytes reset the command buffer 
 | `c HH VV\r`  | write EEPROM cell HH with value VV              | any                       |
 | `a\r`         | toggle auto-tune mode                           | any                       |
 | `m\r`         | dump all 30 saved band sub-slots                | any                       |
+| `q\r`         | abort in-progress tune; relays restored to pre-tune state | `OK ABORT` |
 
 `l` response detail:
 - `RECALL IND=N CAP=N SW=N SWR=N` — slot found and relays applied; SWR is stored value × 100
