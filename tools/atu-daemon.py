@@ -33,6 +33,7 @@ command line (after pressing :):
   ?          ATU status line (IND CAP SW SWR AUTO)
   d 1        enable DBG telemetry (logged to /tmp/atu-dbg.log)
   d 0        disable DBG telemetry
+  q          abort current tune
 
 serial port: RB1=TX, RB2=RX, 9600 8N1 (USB-UART converter)
 """

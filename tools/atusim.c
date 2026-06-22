@@ -17,6 +17,10 @@
  *   S8  upsert update         — existing slot within 25 kHz updated in place
  *   S9  evict worst-SWR       — all 3 sub-slots full, worst SWR evicted for new freq
  *   S10 cross-band isolation  — 40m tune never touches 20m band slots
+ *   S11 jittery ADC spike     — sharp_cap finds true min past spike at cap=16
+ *   S12 abort mid-coarse      — relay state restored to pre-tune snapshot
+ *   S13 tick budget           — full tune completes in ≤ 25 ticks
+ *   S14 abort during sharp    — sim_relay_* physical state restored on inhibit
  */
 
 #include <stdio.h>
@@ -556,7 +560,10 @@ int main(void)
     }
 
     /* S13: tune_tick terminates within tick budget.
-     * Full S3-style tune via run_tune() must complete in fewer than 10000 ticks. */
+     * The worst-case correct path is 13 states (INIT→PROBE→RESET→COARSE→
+     * SHARP_IND→SHARP_CAP→SW_COMPARE→COARSE→SHARP_IND→SHARP_CAP→SW_COMPARE→
+     * EXTRA_IND→EXTRA_CAP→SAVE).  Budget of 25 is 2× that; a state machine
+     * looping hundreds of times would be caught immediately. */
     {
         reset_state();
         current_model = model_simple_20m;
@@ -566,11 +573,64 @@ int main(void)
         tune_start();
         while (g_tune_ctx.state != TS_IDLE) {
             tune_tick();
-            if (++l_ticks_s13 > 10000) break;
+            if (++l_ticks_s13 > 25) break;
         }
         result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
-        CHECK("S13 tick budget — terminates < 10000 ticks",
-              g_tune_ctx.state == TS_IDLE && l_ticks_s13 < 10000, r);
+        CHECK("S13 tick budget — terminates <= 25 ticks (worst path is 13)",
+              g_tune_ctx.state == TS_IDLE && l_ticks_s13 <= 25, r);
+    }
+
+    /* S14: abort during TS_SHARP_IND — physical relay state (sim_relay_*) must be
+     * restored, not just the algorithm tracking globals.
+     *
+     * model_flat (SWR=350 everywhere) ensures the machine never exits early at
+     * TS_COARSE (SWR never < 120) and always reaches TS_SHARP_IND.  TX inhibit
+     * is injected at call 25, which falls past TS_INIT+TS_PROBE+TS_RESET and
+     * the coarse_cap inner loop calls, putting it inside the sharp_ind scan.
+     * The sim_relay_* check is the distinguishing assertion: it verifies the
+     * hardware relay state was physically restored, not just the bookkeeping vars. */
+    {
+        reset_state();
+        current_model = model_flat;
+        /* Non-zero starting relays so restore is distinguishable from zero */
+        g_c_ind = 15; g_c_cap = 22; g_c_SW = 0;
+        sim_relay_ind = 15; sim_relay_cap = 22; sim_relay_sw = 0;
+        unsigned char pre_ind = g_c_ind;
+        unsigned char pre_cap = g_c_cap;
+        char          pre_sw  = g_c_SW;
+        /* Inject TX inhibit deep enough to reach TS_SHARP_IND */
+        sim_inhibit_on_call = 25;
+
+        tune_start();
+        {
+            int l_ticks = 0;
+            /* Drive past INIT, PROBE, RESET, COARSE into SHARP_IND */
+            while (g_tune_ctx.state == TS_IDLE   ||
+                   g_tune_ctx.state == TS_INIT    ||
+                   g_tune_ctx.state == TS_PROBE   ||
+                   g_tune_ctx.state == TS_RESET   ||
+                   g_tune_ctx.state == TS_COARSE) {
+                tune_tick();
+                if (++l_ticks > 50000) {
+                    printf("FAIL S14: stuck before TS_SHARP_IND\n"); exit(1);
+                }
+                if (g_tune_ctx.state == TS_IDLE) break;
+            }
+            /* Run to completion — TX inhibit fires inside sharp_ind() which sets
+             * g_i_SWR=0; the TS_SHARP_IND handler then calls atu_reset() and routes
+             * to TS_ABORT, which restores both g_c_* tracking vars and sim_relay_*. */
+            while (g_tune_ctx.state != TS_IDLE) {
+                tune_tick();
+                if (++l_ticks > 50000) {
+                    printf("FAIL S14: runaway after sharp_ind inhibit\n"); exit(1);
+                }
+            }
+        }
+        result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
+        CHECK("S14 abort during sharp_ind — g_c_* and sim_relay_* both restored",
+              r.ind == pre_ind && r.cap == pre_cap && r.sw == pre_sw
+              && sim_relay_ind == pre_ind && sim_relay_cap == pre_cap
+              && sim_relay_sw == pre_sw, r);
     }
 
     printf("\n%d/%d passed\n", passed, total);

@@ -387,8 +387,15 @@ void show_reset()
 
 void tune_btn_push()
 {
+   /* Use tune_start() rather than blocking tune() to avoid the 9-frame call chain
+    * (main→button_proc→tune_btn_push→tune→tune_tick→coarse_tune→coarse_cap→get_swr→get_pwr)
+    * which overflows the PIC16F1938 8-level hardware call stack at get_pwr().
+    * tune_tick() is called cooperatively in the main loop's UART branch and will
+    * run the tune to completion there; the EEPROM writes below happen immediately
+    * after tune_start() sets TS_INIT — they will capture the pre-tune values until
+    * the next loop iteration completes the tune and updates the globals.            */
    CLRWDT();
-   tune();
+   tune_start();
    eeprom_write(EEPROM_LAST_CAP, g_c_cap);
    eeprom_write(EEPROM_LAST_IND, g_c_ind);
    eeprom_write(EEPROM_LAST_SW, g_c_SW);

@@ -121,6 +121,7 @@ static void coarse_tune(void)
    l_coarse_tune_min_swr = 9999;
    for (l_coarse_tune_count = 0; l_coarse_tune_count <= 31;)
    {
+      CLRWDT();  /* up to 11 L × 11 C × ~30 ms each ≈ 3.6 s > 1 s WDT timeout */
       set_ind(l_coarse_tune_count * g_c_L_mult);
       coarse_cap();
       get_swr();
@@ -177,6 +178,7 @@ static void sharp_cap(void)
         l_sharp_cap_count <= l_sharp_cap_max_range;
         l_sharp_cap_count += g_c_C_mult)
    {
+      CLRWDT();  /* full-range scan with retries: up to ~30 steps × 3 reads × ~10 ms each */
       set_cap(l_sharp_cap_count);
       get_swr();
       if (g_i_SWR == 0)
@@ -228,6 +230,7 @@ static void sharp_ind(void)
         l_sharp_ind_count <= l_sharp_ind_max_range;
         l_sharp_ind_count += g_c_L_mult)
    {
+      CLRWDT();  /* full-range scan with retries: up to ~30 steps × 3 reads × ~10 ms each */
       set_ind(l_sharp_ind_count);
       get_swr();
       if (g_i_SWR == 0)
@@ -503,11 +506,6 @@ static unsigned char tune_tick(void)
         }
 #endif
         get_swr();
-        if (g_i_SWR == 0) {
-            ctx->pending_exit = 4;
-            ctx->state = TS_ABORT;
-            return 0;
-        }
         if (g_i_SWR < 110) {
             g_c_tune_exit = 1;
             ctx->pending_exit = 1;
@@ -626,6 +624,12 @@ static unsigned char tune_tick(void)
             return 0;
         }
         get_swr();
+        if (g_i_SWR == 0) {
+            atu_reset();
+            ctx->pending_exit = 7;
+            ctx->state = TS_ABORT;
+            return 0;
+        }
         if (g_i_SWR < 120) {
             if (ctx->pass == 0) {
                 ctx->pending_exit = 8;
@@ -650,6 +654,12 @@ static unsigned char tune_tick(void)
             return 0;
         }
         get_swr();
+        if (g_i_SWR == 0) {
+            atu_reset();
+            ctx->pending_exit = 7;
+            ctx->state = TS_ABORT;
+            return 0;
+        }
 #if defined(UART) && defined(MPLAB_COMPILER)
         if (g_b_debug_mode) {
             uart_puts("DBG FINE_IND");
@@ -682,6 +692,12 @@ static unsigned char tune_tick(void)
             return 0;
         }
         get_swr();
+        if (g_i_SWR == 0) {
+            atu_reset();
+            ctx->pending_exit = 7;
+            ctx->state = TS_ABORT;
+            return 0;
+        }
 #if defined(UART) && defined(MPLAB_COMPILER)
         if (g_b_debug_mode) {
             uart_puts("DBG FINE_CAP");
@@ -884,9 +900,9 @@ static unsigned char tune_tick(void)
 }
 
 /* ── main tuning orchestrator ──
- * Blocking wrapper around tune_tick() for button_proc compatibility.
- * UART-triggered tunes use tune_start() + tune_tick() in the main loop
- * so UART can be serviced between phases.                               */
+ * Blocking wrapper — used only by atusim; firmware uses tune_start().
+ * (tune_btn_push calls tune_start() to avoid overflowing the 8-level
+ *  PIC16F1938 hardware call stack; UART tunes use tune_start() too.)   */
 static void tune(void)
 {
     tune_start();
