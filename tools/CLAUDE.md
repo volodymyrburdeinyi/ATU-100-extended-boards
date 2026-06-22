@@ -5,28 +5,30 @@
 - `atu-daemon.py` — WSJT-X UDP → ATU-100 serial bridge with terminal UI. Zero external dependencies.
 - `atusim.c` — standalone algorithm regression simulator. Compile and run before any firmware commit.
 
-## freq_enc encoding
+## Frequency encoding
 
-Both tools share the same frequency encoding used in firmware EEPROM and UART commands:
+UART commands use raw kHz as a 4-hex-digit big-endian value.  EEPROM stores
+the same raw kHz uint16 (little-endian, lo byte first).
 
 ```
-freq_enc = kHz / 200  (integer division)  =  MHz × 5
+HHHH = kHz in hex, zero-padded to 4 digits
 ```
 
-| Band | Freq   | freq_enc (dec) | freq_enc (hex) |
-|------|--------|----------------|----------------|
-| 160m | 1.8 MHz | 9              | 0x09           |
-| 80m  | 3.5 MHz | 17             | 0x11           |
-| 40m  | 7.0 MHz | 35             | 0x23           |
-| 30m  | 10.1 MHz| 50             | 0x32           |
-| 20m  | 14.0 MHz| 70             | 0x46           |
-| 17m  | 18.1 MHz| 90             | 0x5a           |
-| 15m  | 21.0 MHz| 105            | 0x69           |
-| 12m  | 24.9 MHz| 124            | 0x7c           |
-| 10m  | 28.0 MHz| 140            | 0x8c           |
+| Band | Freq      | kHz   | HHHH  |
+|------|-----------|-------|-------|
+| 160m | 1.8 MHz   | 1800  | 0708  |
+| 80m  | 3.5 MHz   | 3500  | 0DAC  |
+| 40m  | 7.074 MHz | 7074  | 1BA2  |
+| 30m  | 10.1 MHz  | 10100 | 2774  |
+| 20m  | 14.0 MHz  | 14000 | 36B0  |
+| 17m  | 18.1 MHz  | 18100 | 46B4  |
+| 15m  | 21.0 MHz  | 21000 | 51C8  |
+| 12m  | 24.9 MHz  | 24900 | 6144  |
+| 10m  | 28.0 MHz  | 28000 | 6D60  |
+| 6m   | 50.0 MHz  | 50000 | C350  |
 
-WSJT-X sends frequency in Hz; daemon converts with `enc = hz // 200_000`.
-Firmware EEPROM tolerance: ±2 freq_enc units (`EEPROM_BAND_FREQ_TOL`).
+WSJT-X sends frequency in Hz; daemon converts with `khz = hz // 1000`.
+Firmware band-memory tolerance: ±25 kHz (`EEPROM_BAND_FREQ_TOL_KHZ`).
 
 ## Serial protocol contract
 
@@ -37,22 +39,26 @@ Physical: RB1=TX (PIC→host), RB2=RX (host→PIC), 9600 8N1 bit-bang, USB-UART 
 Commands are ASCII terminated with `\r`. The printable-ASCII filter in firmware discards
 any byte outside `0x20–0x7E`, so non-printable bytes reset the command buffer on the PIC side.
 
-| Command    | Meaning                                  | Response keywords        |
-|------------|------------------------------------------|--------------------------|
-| `l HH\r`  | recall slot for freq_enc HH              | `RECALL` or `NOMATCH`    |
-| `t HH\r`  | tune at freq hint HH                     | response contains `IND=` |
-| `r\r`      | reset all relays to zero                 | any                      |
-| `?\r`      | status query (IND CAP SW SWR AUTO SLOTS) | any                      |
-| `e HH\r`  | read EEPROM cell at address HH (hex)     | any                      |
-| `c HH VV\r`| write EEPROM cell HH with value VV      | any                      |
-| `a\r`      | toggle auto-tune mode                    | any                      |
-| `m\r`      | dump all saved band slots                | any                      |
+| Command       | Meaning                                         | Response keywords         |
+|---------------|-------------------------------------------------|---------------------------|
+| `l HHHH\r`   | recall slot for freq kHz (hex)                  | `RECALL` or `NOMATCH`     |
+| `t HHHH\r`   | tune with freq hint kHz (hex)                   | response contains `IND=`  |
+| `r\r`         | reset all relays to zero                        | any                       |
+| `?\r`         | status query (IND CAP SW SWR AUTO EFF SLOTS...) | any                       |
+| `e HH\r`     | read EEPROM cell at address HH (hex)            | any                       |
+| `c HH VV\r`  | write EEPROM cell HH with value VV              | any                       |
+| `a\r`         | toggle auto-tune mode                           | any                       |
+| `m\r`         | dump all 30 saved band sub-slots                | any                       |
 
 `l` response detail:
-- `RECALL IND=N CAP=N SW=N SWR=N` — slot found and relays applied; SWR is stored value × 10
-- `NOMATCH` — no slot within ±2 freq_enc of requested freq
+- `RECALL IND=N CAP=N SW=N SWR=N` — slot found and relays applied; SWR is stored value × 100
+- `NOMATCH` — no slot within ±25 kHz of requested freq
 
 `t` response detail: contains `IND=` on success (daemon checks with `'IND=' in resp`).
+
+SWR scale: **× 100** throughout (100 = 1.0:1, 150 = 1.5:1). Both `l` and `?` responses emit
+integer × 100. The daemon's `_CTRL_SWR_RE` parses this as an integer and stores it in
+`st['swr']` as-is.
 
 ### Display protocol — PIC → host (always flowing, unsolicited)
 
@@ -127,13 +133,27 @@ All fields guarded by `lock` except Events (thread-safe themselves):
 
 ## Simulator (atusim.c)
 
-Runs 6 algorithm scenarios in pure C, no hardware required:
+Runs 10 algorithm scenarios in pure C, no hardware required:
 
 ```bash
 gcc -o /tmp/atusim tools/atusim.c -lm && /tmp/atusim
 ```
 
-All 6 must print `PASS`. The pre-commit hook runs this automatically.
+All 10 must print `PASS`. The pre-commit hook runs this automatically.
 
-Scenarios: bimodal 30m (delta loop), flat unmatchable, simple 20m, TX-inhibit abort,
-band probe hit, band slot write. Add a scenario here whenever you add a new algorithm path.
+The simulator compiles the REAL algorithm from `tune_algo.h` (not copies) — verbatim drift
+between sim and firmware is structurally impossible.
+
+Scenarios:
+  S1  bimodal 30m — global min at high-L must win over local min at low-L
+  S2  flat/unmatchable — constant SWR, algorithm must terminate without crash
+  S3  simple 20m — single minimum, algorithm must find it
+  S4  TX-inhibit mid-scan — pre-scan position must be restored, no hang
+  S5  band probe hit — slot at 7074 kHz recalled, SWR < 150, no full tune
+  S6  new slot write — no existing slot, full tune saves at 7074 kHz
+  S7  cross-band probe miss — 40m tune, 20m slot present, probe misses, full tune
+  S8  upsert update — existing slot within 25 kHz updated in place
+  S9  evict worst-SWR — all 3 sub-slots full, worst SWR evicted for new freq
+  S10 cross-band isolation — 40m tune never touches 20m band slots
+
+Add a scenario whenever you add a new algorithm path.

@@ -6,6 +6,8 @@
 
 MAIN_H="ATU_100_EXT_board/FirmWare_PIC16F1938/1938_EXT_MPLAB_sources_V_3.2/main.h"
 MAIN_C="ATU_100_EXT_board/FirmWare_PIC16F1938/1938_EXT_MPLAB_sources_V_3.2/main.c"
+# Algorithm functions moved to tune_algo.h (Phase 1: single source of truth for firmware + sim)
+TUNE_ALGO_H="ATU_100_EXT_board/FirmWare_PIC16F1938/1938_EXT_MPLAB_sources_V_3.2/tune_algo.h"
 
 # Run atusim on every commit (algorithm changes or not)
 if command -v gcc &>/dev/null && [ -f "tools/atusim.c" ]; then
@@ -20,7 +22,7 @@ if command -v gcc &>/dev/null && [ -f "tools/atusim.c" ]; then
 fi
 
 # Only run static checks when firmware files are staged
-if ! git diff --cached --name-only | grep -qE "1938_EXT_MPLAB_sources_V_3\.2/(main\.h|main\.c)$"; then
+if ! git diff --cached --name-only | grep -qE "1938_EXT_MPLAB_sources_V_3\.2/(main\.h|main\.c|tune_algo\.h)$"; then
   exit 0
 fi
 
@@ -36,10 +38,11 @@ else
 fi
 
 # Fix 2a: coarse_cap() must not have else break and must use strict min_swr = g_i_SWR
-if awk '/void coarse_cap/,/^}/' "$MAIN_H" 2>/dev/null | grep -q 'else.*break'; then
+# (algorithm functions are in tune_algo.h since Phase 1)
+if awk '/void coarse_cap/,/^}/' "$TUNE_ALGO_H" 2>/dev/null | grep -q 'else.*break'; then
   echo "FAIL  Fix 2a: else break still present in coarse_cap()"
   FAIL=1
-elif ! awk '/void coarse_cap/,/^}/' "$MAIN_H" 2>/dev/null | grep -qE 'l_coarse_cap_min_swr\s*=\s*g_i_SWR\s*;'; then
+elif ! awk '/void coarse_cap/,/^}/' "$TUNE_ALGO_H" 2>/dev/null | grep -qE 'l_coarse_cap_min_swr\s*=\s*g_i_SWR\s*;'; then
   echo "FAIL  Fix 2a: strict min_swr = g_i_SWR not found in coarse_cap()"
   FAIL=1
 else
@@ -47,10 +50,10 @@ else
 fi
 
 # Fix 2b: coarse_tune() must start with min_swr = 9999 and have no else break
-if awk '/void coarse_tune/,/^}/' "$MAIN_H" 2>/dev/null | grep -q 'else.*break'; then
+if awk '/void coarse_tune/,/^}/' "$TUNE_ALGO_H" 2>/dev/null | grep -q 'else.*break'; then
   echo "FAIL  Fix 2b: else break still present in coarse_tune()"
   FAIL=1
-elif ! awk '/void coarse_tune/,/^}/' "$MAIN_H" 2>/dev/null | grep -q 'l_coarse_tune_min_swr = 9999'; then
+elif ! awk '/void coarse_tune/,/^}/' "$TUNE_ALGO_H" 2>/dev/null | grep -q 'l_coarse_tune_min_swr = 9999'; then
   echo "FAIL  Fix 2b: min_swr = 9999 not found in coarse_tune()"
   FAIL=1
 else
@@ -58,7 +61,7 @@ else
 fi
 
 # Band memory: band_slot_save() must use unsigned char for address locals to avoid signed wrap corrupting settings area
-if ! awk '/static void band_slot_save/,/^}/' "$MAIN_H" 2>/dev/null | grep -q 'unsigned char l_band, l_sub, l_slot_idx, l_base, l_ind'; then
+if ! awk '/static void band_slot_save/,/^}/' "$TUNE_ALGO_H" 2>/dev/null | grep -q 'unsigned char l_band, l_sub, l_slot_idx, l_base, l_ind'; then
   echo "FAIL  Band memory: band_slot_save() address locals not unsigned char — signed wrap will corrupt EEPROM"
   FAIL=1
 else
@@ -66,7 +69,7 @@ else
 fi
 
 # Band memory: probe loop in tune() must use unsigned char for l_ind — signed char makes 0xFF sentinel check always false
-if ! awk '/probe band memory/,/l_probe_matched = 1/' "$MAIN_H" 2>/dev/null | grep -q 'unsigned char l_sub, l_slot_idx, l_base, l_ind'; then
+if ! awk '/probe band memory/,/l_probe_matched = 1/' "$TUNE_ALGO_H" 2>/dev/null | grep -q 'unsigned char l_sub, l_slot_idx, l_base, l_ind'; then
   echo "FAIL  Band memory: probe loop l_ind not unsigned char — 0xFF sentinel never matches on fresh EEPROM"
   FAIL=1
 else
@@ -74,10 +77,10 @@ else
 fi
 
 # Fix 3: sub_tune() SW-revert block must call get_swr(), not assign g_i_SWR = l_int_swr_mem
-if grep -q 'g_i_SWR = l_int_swr_mem' "$MAIN_H" 2>/dev/null; then
+if grep -q 'g_i_SWR = l_int_swr_mem' "$TUNE_ALGO_H" 2>/dev/null; then
   echo "FAIL  Fix 3: sub_tune() still uses g_i_SWR = l_int_swr_mem (stale assignment)"
   FAIL=1
-elif awk '/void sub_tune/,/^}/' "$MAIN_H" 2>/dev/null | grep -q 'get_swr()'; then
+elif awk '/void sub_tune/,/^}/' "$TUNE_ALGO_H" 2>/dev/null | grep -q 'get_swr()'; then
   echo "PASS  Fix 3: sub_tune() calls get_swr() after SW-revert"
 else
   echo "WARN  Fix 3: get_swr() not found in sub_tune() — check manually"
