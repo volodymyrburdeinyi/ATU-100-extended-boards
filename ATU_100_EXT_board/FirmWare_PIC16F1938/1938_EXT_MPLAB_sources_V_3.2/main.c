@@ -199,6 +199,9 @@ void main()
          button_proc_test();
 #ifdef UART
       uart_cmd_proc();
+      if (tune_tick()) {
+         uart_send_status();
+      }
 #endif
    }
 }
@@ -484,6 +487,11 @@ void cells_init(void)
    CLRWDT();
    return;
 }
+
+/* Cooperative tune state machine context — shared across all TUs.
+ * uart_cmd.c calls tune_start(); main loop calls tune_tick().
+ * Zero-initialised at startup (state = TS_IDLE).                */
+tune_ctx_t g_tune_ctx;
 
 #ifdef UART
 

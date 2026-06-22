@@ -21,6 +21,7 @@
 
 #include <stdio.h>
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ── UART must be defined so g_b_slot_saved/g_c_tune_exit compile ── */
@@ -78,6 +79,8 @@ static char e_c_b_Loss_ind = 0;
 static unsigned int  g_i_uart_freq_hint = 0;  /* cleared after each use in tune() */
 static unsigned char g_b_slot_saved     = 0;  /* set by band_slot_save(), cleared at tune() start */
 static unsigned char g_c_tune_exit      = 0;  /* exit-path code, cleared at tune() start */
+/* g_b_tune_abort declared here; tune_ctx_t is from tune_algo.h so g_tune_ctx is defined after the include */
+unsigned char g_b_tune_abort = 0;
 
 /* ── scenario state ── */
 typedef int (*swr_fn)(unsigned char ind, unsigned char cap, unsigned char sw);
@@ -170,6 +173,10 @@ static void get_swr(void) {
 /* ── real algorithm: compiled from firmware source (not a copy) ── */
 #include "../ATU_100_EXT_board/FirmWare_PIC16F1938/1938_EXT_MPLAB_sources_V_3.2/tune_algo.h"
 
+/* tune_ctx_t is defined by tune_algo.h above; define the shared instance here
+ * to satisfy the extern declaration inside tune_algo.h.                       */
+tune_ctx_t g_tune_ctx;
+
 /* ── SWR models ─────────────────────────────────────────────────────────────
  *
  * SWR is encoded as integer × 100: 100 = 1.0:1, 150 = 1.5:1, 999 = max/error.
@@ -261,10 +268,31 @@ static void reset_state(void)
     g_i_SWR = 999; g_i_PWR = 5; g_i_P_max = 0; g_i_swr_a = 0;
     g_char_p_cnt = 0; g_char_tune_effort = 0; g_b_rready = 0; g_b_tx_seen = 0;
     g_b_slot_saved = 0; g_c_tune_exit = 0; g_i_uart_freq_hint = 0;
+    g_b_tune_abort = 0;
     sim_call_n = 0; sim_inhibit_on_call = -1; sim_freq = 0;
     sim_relay_ind = 0; sim_relay_cap = 0; sim_relay_sw = 0;
     e_i_tenths_init_max_swr = 0;
     eeprom_reset();
+    /* Clear state machine context so every scenario starts from TS_IDLE */
+    memset(&g_tune_ctx, 0, sizeof(g_tune_ctx));
+}
+
+/* run_tune() — drives the tick loop to completion (replaces direct tune() calls).
+ * Injects a freq hint if non-zero and guards against runaway loops.             */
+static void run_tune(unsigned int freq_hint)
+{
+    int l_ticks;
+    g_i_uart_freq_hint = freq_hint;
+    g_b_tune_abort = 0;
+    tune_start();
+    l_ticks = 0;
+    while (g_tune_ctx.state != TS_IDLE) {
+        tune_tick();
+        if (++l_ticks > 50000) {
+            printf("FAIL run_tune: runaway tick loop (state=%d)\n", (int)g_tune_ctx.state);
+            exit(1);
+        }
+    }
 }
 
 typedef struct { unsigned char ind; unsigned char cap; char sw; int swr; } result_t;
@@ -286,7 +314,7 @@ int main(void)
     {
         reset_state();
         current_model = model_bimodal_30m;
-        tune();
+        run_tune(0);
         result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
         CHECK("S1 bimodal 30m — global min at high L",
               r.ind >= 76 && r.swr < 130, r);
@@ -296,7 +324,7 @@ int main(void)
     {
         reset_state();
         current_model = model_flat;
-        tune();
+        run_tune(0);
         result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
         CHECK("S2 flat unmatchable — terminates, valid SWR",
               r.swr >= 100 && r.swr <= 999, r);
@@ -306,7 +334,7 @@ int main(void)
     {
         reset_state();
         current_model = model_simple_20m;
-        tune();
+        run_tune(0);
         result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
         CHECK("S3 simple 20m — converges to SWR < 120",
               r.swr < 130, r);
@@ -318,7 +346,7 @@ int main(void)
         g_c_ind = 40; g_c_cap = 24;
         current_model = model_simple_20m;
         sim_inhibit_on_call = 20;
-        tune();
+        run_tune(0);
         result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
         CHECK("S4 TX inhibit — pre-scan position restored",
               r.ind == 40 && r.cap == 24, r);
@@ -337,7 +365,7 @@ int main(void)
         eeprom_write(s5_base + EEPROM_SLOT_SW_SWR, (unsigned char)((0u << 7) | 10u));
         sim_freq = 7074;
         current_model = model_simple_20m;
-        tune();
+        run_tune(7074);
         result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
         CHECK("S5 band probe hit (7074 kHz) — slot recalled, SWR < 150",
               r.ind == 32 && r.cap == 24 && r.swr < 150, r);
@@ -349,7 +377,7 @@ int main(void)
         reset_state();
         sim_freq = 7074;
         current_model = model_simple_20m;
-        tune();
+        run_tune(7074);
         result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
         unsigned int  saved_freq = (unsigned int)eeprom_read(s6_base + EEPROM_SLOT_FREQ_LO)
                                  | ((unsigned int)eeprom_read(s6_base + EEPROM_SLOT_FREQ_HI) << 8);
@@ -370,7 +398,7 @@ int main(void)
         eeprom_write(s7_20m_base + EEPROM_SLOT_SW_SWR, (unsigned char)((0u << 7) | 20u));
         sim_freq = 7074;   /* 40m: probe looks at band 2 sub-slots, all empty → full tune */
         current_model = model_simple_20m;
-        tune();
+        run_tune(7074);
         result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
         CHECK("S7 wrong band probe miss — full tune, SWR < 130", r.swr < 130, r);
     }
@@ -395,7 +423,7 @@ int main(void)
         eeprom_write(s8_b1 + EEPROM_SLOT_SW_SWR, (unsigned char)((0u << 7) | 12u));
         sim_freq = 7074;
         current_model = model_simple_20m;
-        tune();
+        run_tune(7074);
         /* Slot 0 should have new (good) ind; slot 1 (7200) must be untouched */
         unsigned char s8_ind0 = eeprom_read(s8_b0 + EEPROM_SLOT_IND);
         unsigned int  s8_f1   = (unsigned int)eeprom_read(s8_b1 + EEPROM_SLOT_FREQ_LO)
@@ -431,7 +459,7 @@ int main(void)
         /* Tune at 7150 kHz: |7150-7000|=150>25, |7150-7074|=76>25, |7150-7200|=50>25 → evict */
         sim_freq = 7150;
         current_model = model_simple_20m;
-        tune();
+        run_tune(7150);
         result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
         /* Slot 0 (worst, swr10=14) should now have 7150, slots 1+2 untouched */
         unsigned int  s9_f0  = (unsigned int)eeprom_read(s9_b0 + EEPROM_SLOT_FREQ_LO)
@@ -451,7 +479,7 @@ int main(void)
         reset_state();
         sim_freq = 7074;
         current_model = model_simple_20m;
-        tune();
+        run_tune(7074);
         result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
         unsigned char s10_20m_ind = eeprom_read(s10_20m + EEPROM_SLOT_IND);
         CHECK("S10 cross-band isolation — 40m tune, 20m band slots untouched",
@@ -477,6 +505,72 @@ int main(void)
         result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
         CHECK("S11 jittery ADC spike — sharp_cap finds true min at cap=17",
               r.cap == 17, r);
+    }
+
+    /* S12: abort mid-coarse — relay state restored to pre-tune values.
+     * Wipe EEPROM so probe misses and state machine reaches TS_COARSE.
+     * Inject abort after the machine passes TS_RESET, then verify relay
+     * state is restored to the snapshot taken in TS_INIT.               */
+    {
+        reset_state();
+        current_model = model_simple_20m;
+        /* Non-zero starting relays so we can verify restore */
+        g_c_ind = 10; g_c_cap = 20; g_c_SW = 0;
+        sim_relay_ind = 10; sim_relay_cap = 20; sim_relay_sw = 0;
+        unsigned char pre_ind = g_c_ind;
+        unsigned char pre_cap = g_c_cap;
+        char          pre_sw  = g_c_SW;
+
+        /* Tick until past TS_RESET (into TS_COARSE or TS_SHARP_IND) then abort */
+        g_b_tune_abort = 0;
+        tune_start();
+        {
+            int l_ticks = 0;
+            /* Drive past INIT, PROBE, RESET states */
+            while (g_tune_ctx.state == TS_IDLE   ||
+                   g_tune_ctx.state == TS_INIT    ||
+                   g_tune_ctx.state == TS_PROBE   ||
+                   g_tune_ctx.state == TS_RESET) {
+                tune_tick();
+                if (++l_ticks > 50000) {
+                    printf("FAIL S12: stuck before TS_COARSE\n"); exit(1);
+                }
+                /* If it already finished (e.g. SWR < 110 on first read), stop */
+                if (g_tune_ctx.state == TS_IDLE) break;
+            }
+            /* Now inject abort and drain to idle */
+            if (g_tune_ctx.state != TS_IDLE) {
+                g_b_tune_abort = 1;
+                l_ticks = 0;
+                while (g_tune_ctx.state != TS_IDLE) {
+                    tune_tick();
+                    if (++l_ticks > 50000) {
+                        printf("FAIL S12: runaway after abort\n"); exit(1);
+                    }
+                }
+            }
+        }
+        result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
+        CHECK("S12 abort mid-coarse — relay state restored",
+              r.ind == pre_ind && r.cap == pre_cap && r.sw == pre_sw, r);
+    }
+
+    /* S13: tune_tick terminates within tick budget.
+     * Full S3-style tune via run_tune() must complete in fewer than 10000 ticks. */
+    {
+        reset_state();
+        current_model = model_simple_20m;
+        int l_ticks_s13 = 0;
+        g_i_uart_freq_hint = 0;
+        g_b_tune_abort = 0;
+        tune_start();
+        while (g_tune_ctx.state != TS_IDLE) {
+            tune_tick();
+            if (++l_ticks_s13 > 10000) break;
+        }
+        result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
+        CHECK("S13 tick budget — terminates < 10000 ticks",
+              g_tune_ctx.state == TS_IDLE && l_ticks_s13 < 10000, r);
     }
 
     printf("\n%d/%d passed\n", passed, total);

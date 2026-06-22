@@ -414,372 +414,486 @@ static void band_slot_save(char l_probe_matched, unsigned int l_freq_kHz)
    g_b_slot_saved = 1;
 }
 
-/* ── main tuning orchestrator ──
- * Call sequence:
- *   1. Quick check: SWR already < 1.1:1 → save and return (exit 1)
- *   2. Probe band memory for stored match within ±25 kHz → recall and return (exit 2/3)
- *   3. Full search: atu_reset → sub_tune → sharp fine passes → save and return (exit 4-13)
- * g_c_tune_exit records which path was taken (diagnostic, shown in status line).
- * g_b_slot_saved is set by band_slot_save() if a write occurred.            */
-static void tune(void)
-{
-   unsigned char l_tune_ind_mem, l_tune_cap_mem;
-   char l_tune_sw_mem;
-   unsigned int l_freq_kHz;
-   char l_probe_matched = 0;
-   CLRWDT();
-   //
-   g_char_p_cnt = 0;
-   g_i_P_max = 0;
-   g_char_tune_effort = 0;
-   g_b_slot_saved = 0;
-   g_c_tune_exit  = 0;
-   //
-   g_b_rready = 0;
-   g_b_tx_seen = 0;
-   l_tune_ind_mem = g_c_ind;
-   l_tune_cap_mem = g_c_cap;
-   l_tune_sw_mem  = g_c_SW;
-   l_freq_kHz = measure_freq();
+/* ── Phase 6: cooperative tune state machine ── */
+typedef enum {
+    TS_IDLE = 0,
+    TS_INIT,        /* snapshot pre-tune state, get initial SWR */
+    TS_PROBE,       /* band memory probe — EEPROM reads only */
+    TS_RESET,       /* atu_reset + Delay_ms(50) + get_swr */
+    TS_COARSE,      /* coarse_tune() for current SW pass */
+    TS_SHARP_IND,   /* sharp_ind() for current SW pass */
+    TS_SHARP_CAP,   /* sharp_cap() for current SW pass */
+    TS_SW_COMPARE,  /* compare pass0 vs pass1, pick winner */
+    TS_EXTRA_IND,   /* extra sharp_ind if e_c_num_L_q > 5 */
+    TS_EXTRA_CAP,   /* extra sharp_cap if e_c_num_C_q > 5 */
+    TS_SAVE,        /* band_slot_save then → TS_IDLE */
+    TS_ABORT        /* restore pre_ind/cap/sw then → TS_IDLE */
+} tune_state_t;
+
+typedef struct {
+    tune_state_t  state;
+    /* pre-tune relay snapshot — restored on abort or TX-inhibit */
+    unsigned char pre_ind, pre_cap;
+    char          pre_sw;
+    /* frequency and probe result */
+    unsigned int  freq_kHz;
+    char          probe_matched;
+    /* sub_tune two-pass SW comparison */
+    unsigned char pass;          /* 0 = original SW, 1 = flipped SW */
+    int           swr_before_flip;   /* SWR before deciding to flip */
+    unsigned char pass0_ind, pass0_cap;
+    char          pass0_sw;
+    int           pass0_swr;    /* best SWR from pass 0 */
+    /* exit code to commit when reaching TS_SAVE */
+    unsigned char pending_exit;
+} tune_ctx_t;
+
+/* Defined in main.c (firmware) and in atusim.c (simulator).
+ * Declared extern here so every TU that includes tune_algo.h shares the
+ * single instance — critical because uart_cmd.c calls tune_start() and
+ * main.c calls tune_tick(), both of which must see the same state.      */
+extern tune_ctx_t g_tune_ctx;
+
 #ifdef UART
-   if (l_freq_kHz == 0 && g_i_uart_freq_hint != 0) { l_freq_kHz = g_i_uart_freq_hint; g_i_uart_freq_hint = 0; }
+extern unsigned char g_b_tune_abort;  /* set by 'q' UART command */
 #endif
-   get_swr();
-   if (g_i_SWR < 110)
-   {
-      g_c_tune_exit = 1;
-      band_slot_save(l_probe_matched, l_freq_kHz);
+
+static void tune_start(void)
+{
+    /* If already running, do not restart */
+    if (g_tune_ctx.state != TS_IDLE) return;
+    g_tune_ctx.state = TS_INIT;
+#ifdef UART
+    g_b_tune_abort = 0;
+#endif
+}
+
+/* tune_tick() — cooperative state machine dispatcher.
+ * Returns 0 while running, 1 when done (state returned to TS_IDLE).
+ * Each call executes exactly one sub-phase so the main loop can service
+ * UART between phases without relay.c changes.                          */
+static unsigned char tune_tick(void)
+{
+    tune_ctx_t *ctx = &g_tune_ctx;
+
+    switch (ctx->state) {
+
+    case TS_IDLE:
+        return 0;
+
+    case TS_INIT:
+        /* Snapshot pre-tune relay positions for abort restore */
+        ctx->pre_ind = g_c_ind;
+        ctx->pre_cap = g_c_cap;
+        ctx->pre_sw  = g_c_SW;
+        /* Clear per-tune counters */
+        g_char_p_cnt      = 0;
+        g_i_P_max         = 0;
+        g_char_tune_effort = 0;
+        g_b_slot_saved    = 0;
+        g_c_tune_exit     = 0;
+        ctx->probe_matched = 0;
+        ctx->pass          = 0;
+        /* Measure frequency; fall back to UART hint if radio is silent */
+        ctx->freq_kHz = measure_freq();
+#ifdef UART
+        if (ctx->freq_kHz == 0 && g_i_uart_freq_hint != 0) {
+            ctx->freq_kHz = g_i_uart_freq_hint;
+            g_i_uart_freq_hint = 0;
+        }
+#endif
+        get_swr();
+        if (g_i_SWR == 0) {
+            ctx->pending_exit = 4;
+            ctx->state = TS_ABORT;
+            return 0;
+        }
+        if (g_i_SWR < 110) {
+            g_c_tune_exit = 1;
+            ctx->pending_exit = 1;
+            ctx->state = TS_SAVE;
+            return 0;
+        }
+        ctx->state = TS_PROBE;
+        return 0;
+
+    case TS_PROBE:
+#ifdef UART
+        if (g_b_tune_abort) { ctx->state = TS_ABORT; return 0; }
+#endif
+        if (ctx->freq_kHz == 0) {
+            /* No frequency — skip probe, reset SW, proceed to full tune */
+            g_c_SW = 0;
+            set_sw(g_c_SW);
+            ctx->state = TS_RESET;
+            return 0;
+        }
+        {
+            unsigned char l_band_idx = freq_to_band_idx(ctx->freq_kHz);
+            if (l_band_idx != 0xFF) {
+                unsigned char l_sub, l_slot_idx, l_base, l_ind, l_sw_swr;
+                unsigned int  l_sf, l_diff;
+                for (l_sub = 0; l_sub < (unsigned char)EEPROM_BAND_SUB_N; l_sub++) {
+                    l_slot_idx = (unsigned char)(l_band_idx * (unsigned char)EEPROM_BAND_SUB_N + l_sub);
+                    l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_slot_idx * (unsigned char)EEPROM_BAND_SLOT_STRIDE);
+                    l_ind = eeprom_read(l_base + EEPROM_SLOT_IND);
+                    if (l_ind == 0xFF) continue;
+                    l_sf = (unsigned int)eeprom_read(l_base + EEPROM_SLOT_FREQ_LO)
+                         | ((unsigned int)eeprom_read(l_base + EEPROM_SLOT_FREQ_HI) << 8);
+                    if (l_sf == 0) continue;
+                    l_diff = (l_sf > ctx->freq_kHz) ? (unsigned int)(l_sf - ctx->freq_kHz)
+                                                     : (unsigned int)(ctx->freq_kHz - l_sf);
+                    if (l_diff > (unsigned int)EEPROM_BAND_FREQ_TOL_KHZ) continue;
+                    /* Slot matched — apply relays and measure live SWR */
+                    g_c_ind = l_ind;
+                    g_c_cap = eeprom_read(l_base + EEPROM_SLOT_CAP);
+                    l_sw_swr = eeprom_read(l_base + EEPROM_SLOT_SW_SWR);
+                    g_c_SW = (char)((l_sw_swr >> 7) & 1u);
+                    set_ind(g_c_ind);
+                    set_cap(g_c_cap);
+                    set_sw(g_c_SW);
+                    get_swr();
+                    if (g_i_SWR == 0) {
+                        /* TX inhibit during probe — restore pre-tune relays */
+                        g_c_tune_exit = 2;
+                        ctx->pending_exit = 2;
+                        ctx->state = TS_ABORT;
+                        return 0;
+                    }
+                    if (g_i_SWR < 150) {
+                        /* Probe hit — upsert if current SWR is better than stored */
+                        unsigned char l_stored_swr10 = l_sw_swr & 0x7Fu;
+                        g_c_tune_exit = 3;
+                        ctx->pending_exit = 3;
+                        if (g_i_SWR > 0 && (unsigned char)((unsigned int)g_i_SWR / 10u) < l_stored_swr10)
+                            ctx->probe_matched = 0;   /* let band_slot_save overwrite */
+                        else
+                            ctx->probe_matched = 1;   /* suppress save — stored SWR is already good */
+                        ctx->state = TS_SAVE;
+                        return 0;
+                    }
+                    /* Probe applied but SWR still ≥ 150 — fall through to full tune */
+                    break;
+                }
+            }
+            /* No usable match — reset SW before full scan */
+            g_c_SW = 0;
+            set_sw(g_c_SW);
+        }
+        ctx->state = TS_RESET;
+        return 0;
+
+    case TS_RESET:
+#ifdef UART
+        if (g_b_tune_abort) { ctx->state = TS_ABORT; return 0; }
+#endif
+        g_char_tune_effort = 0;
+        atu_reset();
+        if (e_c_b_Loss_ind == 0)
+            lcd_ind();
+        Delay_ms(50);
+        get_swr();
+        g_i_swr_a = g_i_SWR;
+        if (g_i_SWR == 0) {
+            ctx->pending_exit = 4;
+            ctx->state = TS_ABORT;
+            return 0;
+        }
+        if (g_i_SWR < 110) {
+            ctx->pending_exit = 5;
+            ctx->state = TS_SAVE;
+            return 0;
+        }
+        if (e_i_tenths_init_max_swr > 110 && g_i_SWR > e_i_tenths_init_max_swr) {
+            ctx->pending_exit = 6;
+            ctx->state = TS_SAVE;
+            return 0;
+        }
+        /* Store entry SWR for later "good enough improvement" check in TS_SHARP_CAP */
+        ctx->swr_before_flip = g_i_SWR;
+        ctx->state = TS_COARSE;
+        return 0;
+
+    case TS_COARSE:
+#ifdef UART
+        if (g_b_tune_abort) { ctx->state = TS_ABORT; return 0; }
+#endif
+        coarse_tune();
+        if (g_i_SWR == 0) {
+            atu_reset();
+            ctx->pending_exit = 7;
+            ctx->state = TS_ABORT;
+            return 0;
+        }
+        get_swr();
+        if (g_i_SWR < 120) {
+            if (ctx->pass == 0) {
+                ctx->pending_exit = 8;
+                ctx->state = TS_SAVE;
+            } else {
+                ctx->state = TS_SW_COMPARE;
+            }
+            return 0;
+        }
+        ctx->state = TS_SHARP_IND;
+        return 0;
+
+    case TS_SHARP_IND:
+#ifdef UART
+        if (g_b_tune_abort) { ctx->state = TS_ABORT; return 0; }
+#endif
+        sharp_ind();
+        if (g_i_SWR == 0) {
+            atu_reset();
+            ctx->pending_exit = 7;
+            ctx->state = TS_ABORT;
+            return 0;
+        }
+        get_swr();
 #if defined(UART) && defined(MPLAB_COMPILER)
-      if (g_b_debug_mode) {
-         uart_puts("DBG DONE");
-         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
-         tune_dbg_uint(" ind=", (int)g_c_ind);
-         tune_dbg_uint(" cap=", (int)g_c_cap);
-         tune_dbg_uint(" sw=", (int)g_c_SW);
-         tune_dbg_uint(" swr=", g_i_SWR);
-         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
-         uart_puts("\r\n");
-      }
+        if (g_b_debug_mode) {
+            uart_puts("DBG FINE_IND");
+            tune_dbg_uint(" ind=", (int)g_c_ind);
+            tune_dbg_uint(" swr=", g_i_SWR);
+            uart_puts("\r\n");
+        }
 #endif
-      return;
-   }
-   /* probe band memory: search the 3 sub-slots for the current band */
-   if (l_freq_kHz > 0)
-   {
-      unsigned char l_band_idx = freq_to_band_idx(l_freq_kHz);
-      if (l_band_idx != 0xFF)
-      {
-         unsigned char l_sub, l_slot_idx, l_base, l_ind, l_sw_swr;
-         unsigned int  l_sf, l_diff;
-         for (l_sub = 0; l_sub < (unsigned char)EEPROM_BAND_SUB_N; l_sub++)
-         {
-            l_slot_idx = (unsigned char)(l_band_idx * (unsigned char)EEPROM_BAND_SUB_N + l_sub);
-            l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_slot_idx * (unsigned char)EEPROM_BAND_SLOT_STRIDE);
-            l_ind = eeprom_read(l_base + EEPROM_SLOT_IND);
-            if (l_ind == 0xFF) continue;
-            l_sf = (unsigned int)eeprom_read(l_base + EEPROM_SLOT_FREQ_LO)
-                 | ((unsigned int)eeprom_read(l_base + EEPROM_SLOT_FREQ_HI) << 8);
-            if (l_sf == 0) continue;
-            l_diff = (l_sf > l_freq_kHz) ? (unsigned int)(l_sf - l_freq_kHz)
-                                          : (unsigned int)(l_freq_kHz - l_sf);
-            if (l_diff > (unsigned int)EEPROM_BAND_FREQ_TOL_KHZ) continue;
-            g_c_ind = l_ind;
-            g_c_cap = eeprom_read(l_base + EEPROM_SLOT_CAP);
-            l_sw_swr = eeprom_read(l_base + EEPROM_SLOT_SW_SWR);
-            g_c_SW = (char)((l_sw_swr >> 7) & 1u);
+        if (g_i_SWR < 120) {
+            if (ctx->pass == 0) {
+                ctx->pending_exit = 8;
+                ctx->state = TS_SAVE;
+            } else {
+                ctx->state = TS_SW_COMPARE;
+            }
+            return 0;
+        }
+        ctx->state = TS_SHARP_CAP;
+        return 0;
+
+    case TS_SHARP_CAP:
+#ifdef UART
+        if (g_b_tune_abort) { ctx->state = TS_ABORT; return 0; }
+#endif
+        sharp_cap();
+        if (g_i_SWR == 0) {
+            atu_reset();
+            ctx->pending_exit = 7;
+            ctx->state = TS_ABORT;
+            return 0;
+        }
+        get_swr();
+#if defined(UART) && defined(MPLAB_COMPILER)
+        if (g_b_debug_mode) {
+            uart_puts("DBG FINE_CAP");
+            tune_dbg_uint(" cap=", (int)g_c_cap);
+            tune_dbg_uint(" swr=", g_i_SWR);
+            uart_puts("\r\n");
+        }
+#endif
+        if (ctx->pass == 0) {
+            if (g_i_SWR < 120) {
+                ctx->pending_exit = 8;
+                ctx->state = TS_SAVE;
+                return 0;
+            }
+            /* Good enough improvement — no need for SW flip */
+            if (g_i_SWR < 200 && g_i_SWR < ctx->swr_before_flip
+                    && (ctx->swr_before_flip - g_i_SWR) > 100) {
+                ctx->pending_exit = 8;
+                ctx->state = TS_SAVE;
+                return 0;
+            }
+            /* Save pass 0 best result before flipping SW */
+            ctx->pass0_swr = g_i_SWR;
+            ctx->pass0_ind = g_c_ind;
+            ctx->pass0_cap = g_c_cap;
+            ctx->pass0_sw  = g_c_SW;
+            ctx->swr_before_flip = g_i_SWR;
+            /* Flip SW and measure immediately */
+            if (g_c_SW == 1) g_c_SW = 0; else g_c_SW = 1;
+            atu_reset();
+            set_sw(g_c_SW);
+            Delay_ms(50);
+            get_swr();
+            if (g_i_SWR < 120) {
+                /* Flipped SW already good — go straight to compare */
+                ctx->state = TS_SW_COMPARE;
+                return 0;
+            }
+            /* Run full coarse+sharp pass with flipped SW */
+            ctx->pass = 1;
+            ctx->state = TS_COARSE;
+            return 0;
+        }
+        /* pass == 1: proceed to compare */
+        ctx->state = TS_SW_COMPARE;
+        return 0;
+
+    case TS_SW_COMPARE:
+#ifdef UART
+        if (g_b_tune_abort) { ctx->state = TS_ABORT; return 0; }
+#endif
+#if defined(UART) && defined(MPLAB_COMPILER)
+        if (g_b_debug_mode) {
+            uart_puts("DBG SW_FINE");
+            tune_dbg_uint(" swr=", g_i_SWR);
+            uart_puts("\r\n");
+        }
+#endif
+        /* If pass1 is worse than pass0, restore pass0 relay state */
+        if (g_i_SWR > ctx->pass0_swr) {
+            g_c_SW  = ctx->pass0_sw;
+            g_c_ind = ctx->pass0_ind;
+            g_c_cap = ctx->pass0_cap;
+            set_sw(g_c_SW);
             set_ind(g_c_ind);
             set_cap(g_c_cap);
-            set_sw(g_c_SW);
             get_swr();
-            if (g_i_SWR == 0)
-            {
-               g_c_tune_exit = 2;
-               g_c_ind = l_tune_ind_mem; g_c_cap = l_tune_cap_mem; g_c_SW = l_tune_sw_mem;
-               set_ind(g_c_ind); set_cap(g_c_cap); set_sw(g_c_SW);
-#if defined(UART) && defined(MPLAB_COMPILER)
-               if (g_b_debug_mode) {
-                  uart_puts("DBG DONE");
-                  tune_dbg_uint(" exit=", (int)g_c_tune_exit);
-                  tune_dbg_uint(" ind=", (int)g_c_ind);
-                  tune_dbg_uint(" cap=", (int)g_c_cap);
-                  tune_dbg_uint(" sw=", (int)g_c_SW);
-                  tune_dbg_uint(" swr=", g_i_SWR);
-                  tune_dbg_uint(" saved=", (int)g_b_slot_saved);
-                  uart_puts("\r\n");
-               }
-#endif
-               return;
-            }
-            if (g_i_SWR < 150)
-            {
-               /* upsert: overwrite stored SWR only when current measurement improved */
-               unsigned char l_stored_swr10 = l_sw_swr & 0x7Fu;
-               g_c_tune_exit = 3;
-               if (g_i_SWR > 0 && (unsigned char)((unsigned int)g_i_SWR / 10u) < l_stored_swr10)
-                  band_slot_save(0, l_freq_kHz);
-               else
-                  l_probe_matched = 1;
-#if defined(UART) && defined(MPLAB_COMPILER)
-               if (g_b_debug_mode) {
-                  uart_puts("DBG DONE");
-                  tune_dbg_uint(" exit=", (int)g_c_tune_exit);
-                  tune_dbg_uint(" ind=", (int)g_c_ind);
-                  tune_dbg_uint(" cap=", (int)g_c_cap);
-                  tune_dbg_uint(" sw=", (int)g_c_SW);
-                  tune_dbg_uint(" swr=", g_i_SWR);
-                  tune_dbg_uint(" saved=", (int)g_b_slot_saved);
-                  uart_puts("\r\n");
-               }
-#endif
-               return;
-            }
-         }
-         /* no sub-slot matched — reset SW before full tune */
-         g_c_SW = 0;
-         set_sw(g_c_SW);
-      }
-   }
-   g_char_tune_effort = 0;
-   atu_reset();
-   if (e_c_b_Loss_ind == 0)
-      lcd_ind();
-   Delay_ms(50);
-   get_swr();
-   g_i_swr_a = g_i_SWR;
-   if (g_i_SWR == 0)
-   {
-      g_c_tune_exit = 4;
-      g_c_ind = l_tune_ind_mem;
-      g_c_cap = l_tune_cap_mem;
-      g_c_SW  = l_tune_sw_mem;
-      set_ind(g_c_ind);
-      set_cap(g_c_cap);
-      set_sw(g_c_SW);
-#if defined(UART) && defined(MPLAB_COMPILER)
-      if (g_b_debug_mode) {
-         uart_puts("DBG DONE");
-         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
-         tune_dbg_uint(" ind=", (int)g_c_ind);
-         tune_dbg_uint(" cap=", (int)g_c_cap);
-         tune_dbg_uint(" sw=", (int)g_c_SW);
-         tune_dbg_uint(" swr=", g_i_SWR);
-         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
-         uart_puts("\r\n");
-      }
-#endif
-      return;
-   }
-   if (g_i_SWR < 110)
-   {
-      g_c_tune_exit = 5;
-      band_slot_save(l_probe_matched, l_freq_kHz);
-#if defined(UART) && defined(MPLAB_COMPILER)
-      if (g_b_debug_mode) {
-         uart_puts("DBG DONE");
-         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
-         tune_dbg_uint(" ind=", (int)g_c_ind);
-         tune_dbg_uint(" cap=", (int)g_c_cap);
-         tune_dbg_uint(" sw=", (int)g_c_SW);
-         tune_dbg_uint(" swr=", g_i_SWR);
-         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
-         uart_puts("\r\n");
-      }
-#endif
-      return;
-   }
-   if (e_i_tenths_init_max_swr > 110 && g_i_SWR > e_i_tenths_init_max_swr)
-   {
-      g_c_tune_exit = 6;
-#if defined(UART) && defined(MPLAB_COMPILER)
-      if (g_b_debug_mode) {
-         uart_puts("DBG DONE");
-         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
-         tune_dbg_uint(" ind=", (int)g_c_ind);
-         tune_dbg_uint(" cap=", (int)g_c_cap);
-         tune_dbg_uint(" sw=", (int)g_c_SW);
-         tune_dbg_uint(" swr=", g_i_SWR);
-         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
-         uart_puts("\r\n");
-      }
-#endif
-      return;
-   }
-   //
-   sub_tune();
-#if defined(UART) && defined(MPLAB_COMPILER)
-   if (g_b_debug_mode) {
-      uart_puts("DBG COARSE");
-      tune_dbg_uint(" ind=", (int)g_c_ind);
-      tune_dbg_uint(" cap=", (int)g_c_cap);
-      tune_dbg_uint(" swr=", g_i_SWR);
-      uart_puts("\r\n");
-   }
-#endif
-   if (g_i_SWR == 0)
-   {
-      g_c_tune_exit = 7;
-      g_c_ind = l_tune_ind_mem;
-      g_c_cap = l_tune_cap_mem;
-      g_c_SW  = l_tune_sw_mem;
-      set_ind(g_c_ind);
-      set_cap(g_c_cap);
-      set_sw(g_c_SW);
-#if defined(UART) && defined(MPLAB_COMPILER)
-      if (g_b_debug_mode) {
-         uart_puts("DBG DONE");
-         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
-         tune_dbg_uint(" ind=", (int)g_c_ind);
-         tune_dbg_uint(" cap=", (int)g_c_cap);
-         tune_dbg_uint(" sw=", (int)g_c_SW);
-         tune_dbg_uint(" swr=", g_i_SWR);
-         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
-         uart_puts("\r\n");
-      }
-#endif
-      return;
-   }
-   if (g_i_SWR < 120)
-   {
-      g_c_tune_exit = 8;
-      band_slot_save(l_probe_matched, l_freq_kHz);
-#if defined(UART) && defined(MPLAB_COMPILER)
-      if (g_b_debug_mode) {
-         uart_puts("DBG DONE");
-         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
-         tune_dbg_uint(" ind=", (int)g_c_ind);
-         tune_dbg_uint(" cap=", (int)g_c_cap);
-         tune_dbg_uint(" sw=", (int)g_c_SW);
-         tune_dbg_uint(" swr=", g_i_SWR);
-         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
-         uart_puts("\r\n");
-      }
-#endif
-      return;
-   }
-   if (e_c_num_C_q == 5 && e_c_num_L_q == 5)
-   {
-      g_c_tune_exit = 9;
-      band_slot_save(l_probe_matched, l_freq_kHz);
-#if defined(UART) && defined(MPLAB_COMPILER)
-      if (g_b_debug_mode) {
-         uart_puts("DBG DONE");
-         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
-         tune_dbg_uint(" ind=", (int)g_c_ind);
-         tune_dbg_uint(" cap=", (int)g_c_cap);
-         tune_dbg_uint(" sw=", (int)g_c_SW);
-         tune_dbg_uint(" swr=", g_i_SWR);
-         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
-         uart_puts("\r\n");
-      }
-#endif
-      return;
-   }
+        }
+        /* Decide next step based on current SWR and multiplier settings */
+        if (g_i_SWR == 0) {
+            ctx->pending_exit = 7;
+            ctx->state = TS_ABORT;
+            return 0;
+        }
+        if (g_i_SWR < 120) {
+            ctx->pending_exit = 8;
+            ctx->state = TS_SAVE;
+            return 0;
+        }
+        if (e_c_num_C_q == 5 && e_c_num_L_q == 5) {
+            ctx->pending_exit = 9;
+            ctx->state = TS_SAVE;
+            return 0;
+        }
+        if (e_c_num_L_q > 5) {
+            ctx->state = TS_EXTRA_IND;
+            return 0;
+        }
+        if (e_c_num_C_q > 5) {
+            ctx->state = TS_EXTRA_CAP;
+            return 0;
+        }
+        ctx->pending_exit = 13;
+        ctx->state = TS_SAVE;
+        return 0;
 
-   if (e_c_num_L_q > 5)
-   {
-      g_c_step_ind = g_c_L_mult;
-      g_c_L_mult = 1;
-      sharp_ind();
-   }
-   if (g_i_SWR == 0)
-   {
-      g_c_tune_exit = 10;
-      g_c_ind = l_tune_ind_mem;
-      g_c_cap = l_tune_cap_mem;
-      g_c_SW  = l_tune_sw_mem;
-      set_ind(g_c_ind);
-      set_cap(g_c_cap);
-      set_sw(g_c_SW);
-#if defined(UART) && defined(MPLAB_COMPILER)
-      if (g_b_debug_mode) {
-         uart_puts("DBG DONE");
-         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
-         tune_dbg_uint(" ind=", (int)g_c_ind);
-         tune_dbg_uint(" cap=", (int)g_c_cap);
-         tune_dbg_uint(" sw=", (int)g_c_SW);
-         tune_dbg_uint(" swr=", g_i_SWR);
-         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
-         uart_puts("\r\n");
-      }
+    case TS_EXTRA_IND:
+#ifdef UART
+        if (g_b_tune_abort) { ctx->state = TS_ABORT; return 0; }
 #endif
-      return;
-   }
-   if (g_i_SWR < 120)
-   {
-      g_c_tune_exit = 11;
-      band_slot_save(l_probe_matched, l_freq_kHz);
-#if defined(UART) && defined(MPLAB_COMPILER)
-      if (g_b_debug_mode) {
-         uart_puts("DBG DONE");
-         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
-         tune_dbg_uint(" ind=", (int)g_c_ind);
-         tune_dbg_uint(" cap=", (int)g_c_cap);
-         tune_dbg_uint(" sw=", (int)g_c_SW);
-         tune_dbg_uint(" swr=", g_i_SWR);
-         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
-         uart_puts("\r\n");
-      }
+        g_c_step_ind = g_c_L_mult;
+        g_c_L_mult   = 1;
+        sharp_ind();
+        if (g_i_SWR == 0) {
+            ctx->pending_exit = 10;
+            ctx->state = TS_ABORT;
+            return 0;
+        }
+        get_swr();
+        if (g_i_SWR < 120) {
+            ctx->pending_exit = 11;
+            ctx->state = TS_SAVE;
+            return 0;
+        }
+        if (e_c_num_C_q > 5) {
+            ctx->state = TS_EXTRA_CAP;
+            return 0;
+        }
+        ctx->pending_exit = 13;
+        ctx->state = TS_SAVE;
+        return 0;
+
+    case TS_EXTRA_CAP:
+#ifdef UART
+        if (g_b_tune_abort) { ctx->state = TS_ABORT; return 0; }
 #endif
-      return;
-   }
-   if (e_c_num_C_q > 5)
-   {
-      g_c_step_cap = g_c_C_mult;
-      g_c_C_mult = 1;
-      sharp_cap();
-   }
-   if (g_i_SWR == 0)
-   {
-      g_c_tune_exit = 12;
-      g_c_ind = l_tune_ind_mem;
-      g_c_cap = l_tune_cap_mem;
-      g_c_SW  = l_tune_sw_mem;
-      set_ind(g_c_ind);
-      set_cap(g_c_cap);
-      set_sw(g_c_SW);
+        g_c_step_cap = g_c_C_mult;
+        g_c_C_mult   = 1;
+        sharp_cap();
+        if (g_i_SWR == 0) {
+            ctx->pending_exit = 12;
+            ctx->state = TS_ABORT;
+            return 0;
+        }
+        /* Restore multipliers to match tune() lines 754-765 */
+        if (e_c_num_L_q == 5)      g_c_L_mult = 1;
+        else if (e_c_num_L_q == 6) g_c_L_mult = 2;
+        else if (e_c_num_L_q == 7) g_c_L_mult = 4;
+        if (e_c_num_C_q == 5)      g_c_C_mult = 1;
+        else if (e_c_num_C_q == 6) g_c_C_mult = 2;
+        else if (e_c_num_C_q == 7) g_c_C_mult = 4;
+        get_swr();
+        ctx->pending_exit = 13;
+        ctx->state = TS_SAVE;
+        return 0;
+
+    case TS_SAVE:
+        g_c_tune_exit = ctx->pending_exit;
+        /* Exits that represent successful/partial matches where we save */
+        if (ctx->pending_exit != 2u && ctx->pending_exit != 4u
+                && ctx->pending_exit != 6u && ctx->pending_exit != 7u
+                && ctx->pending_exit != 10u && ctx->pending_exit != 12u) {
+            band_slot_save(ctx->probe_matched, ctx->freq_kHz);
+        }
 #if defined(UART) && defined(MPLAB_COMPILER)
-      if (g_b_debug_mode) {
-         uart_puts("DBG DONE");
-         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
-         tune_dbg_uint(" ind=", (int)g_c_ind);
-         tune_dbg_uint(" cap=", (int)g_c_cap);
-         tune_dbg_uint(" sw=", (int)g_c_SW);
-         tune_dbg_uint(" swr=", g_i_SWR);
-         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
-         uart_puts("\r\n");
-      }
+        if (g_b_debug_mode) {
+            uart_puts("DBG DONE");
+            tune_dbg_uint(" exit=", (int)g_c_tune_exit);
+            tune_dbg_uint(" ind=", (int)g_c_ind);
+            tune_dbg_uint(" cap=", (int)g_c_cap);
+            tune_dbg_uint(" sw=", (int)g_c_SW);
+            tune_dbg_uint(" swr=", g_i_SWR);
+            tune_dbg_uint(" saved=", (int)g_b_slot_saved);
+            uart_puts("\r\n");
+        }
 #endif
-      return;
-   }
-   if (e_c_num_L_q == 5)
-      g_c_L_mult = 1;
-   else if (e_c_num_L_q == 6)
-      g_c_L_mult = 2;
-   else if (e_c_num_L_q == 7)
-      g_c_L_mult = 4;
-   if (e_c_num_C_q == 5)
-      g_c_C_mult = 1;
-   else if (e_c_num_C_q == 6)
-      g_c_C_mult = 2;
-   else if (e_c_num_C_q == 7)
-      g_c_C_mult = 4;
-   get_swr();
-   g_c_tune_exit = 13;
-   band_slot_save(l_probe_matched, l_freq_kHz);
+        CLRWDT();
+        ctx->state = TS_IDLE;
+        return 1;
+
+    case TS_ABORT:
+        g_c_ind = ctx->pre_ind;
+        g_c_cap = ctx->pre_cap;
+        g_c_SW  = ctx->pre_sw;
+        set_ind(ctx->pre_ind);
+        set_cap(ctx->pre_cap);
+        set_sw(ctx->pre_sw);
+        if (g_c_tune_exit == 0)
+            g_c_tune_exit = ctx->pending_exit;
 #if defined(UART) && defined(MPLAB_COMPILER)
-   if (g_b_debug_mode) {
-      uart_puts("DBG DONE");
-      tune_dbg_uint(" exit=", (int)g_c_tune_exit);
-      tune_dbg_uint(" ind=", (int)g_c_ind);
-      tune_dbg_uint(" cap=", (int)g_c_cap);
-      tune_dbg_uint(" sw=", (int)g_c_SW);
-      tune_dbg_uint(" swr=", g_i_SWR);
-      tune_dbg_uint(" saved=", (int)g_b_slot_saved);
-      uart_puts("\r\n");
-   }
+        if (g_b_debug_mode) {
+            uart_puts("DBG DONE");
+            tune_dbg_uint(" exit=", (int)g_c_tune_exit);
+            tune_dbg_uint(" ind=", (int)g_c_ind);
+            tune_dbg_uint(" cap=", (int)g_c_cap);
+            tune_dbg_uint(" sw=", (int)g_c_SW);
+            tune_dbg_uint(" swr=", g_i_SWR);
+            tune_dbg_uint(" saved=", (int)g_b_slot_saved);
+            uart_puts("\r\n");
+        }
 #endif
-   CLRWDT();
-   return;
+        ctx->state = TS_IDLE;
+        return 1;
+
+    default:
+        /* Unreachable on correct hardware — treat as abort to be safe */
+        ctx->state = TS_IDLE;
+        return 1;
+    }
+}
+
+/* ── main tuning orchestrator ──
+ * Blocking wrapper around tune_tick() for button_proc compatibility.
+ * UART-triggered tunes use tune_start() + tune_tick() in the main loop
+ * so UART can be serviced between phases.                               */
+static void tune(void)
+{
+    tune_start();
+    while (g_tune_ctx.state != TS_IDLE) {
+        CLRWDT();
+        tune_tick();
+    }
 }
 
 #endif /* TUNE_ALGO_H */

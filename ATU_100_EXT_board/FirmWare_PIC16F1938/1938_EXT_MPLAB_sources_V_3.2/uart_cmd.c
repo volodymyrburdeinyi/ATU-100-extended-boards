@@ -3,6 +3,7 @@
 #ifdef UART
 
 unsigned char g_b_debug_mode = 0;
+unsigned char g_b_tune_abort = 0;
 
 /* globals declared in main.h — referenced here */
 extern unsigned char g_c_ind, g_c_cap;
@@ -152,10 +153,15 @@ static signed char band_slot_apply_freq(unsigned int l_freq_kHz)
 static void uart_exec_cmd(const char *l_cmd, unsigned char l_len)
 {
     if (l_cmd[0] == 't') {
-        /* "t HHHH" — tune; optional 4-digit kHz freq hint in hex e.g. "t 1BA2" */
+        /* "t HHHH" — tune; optional 4-digit kHz freq hint in hex e.g. "t 1BA2".
+         * tune_start() only queues TS_INIT; main loop drives tune_tick() and sends
+         * uart_send_status() when tune_tick() returns 1 (done). */
         g_i_uart_freq_hint = (l_len >= 6u) ? parse_hex16(l_cmd + 2) : 0;
-        tune();
-        uart_send_status();
+        tune_start();
+    } else if (l_cmd[0] == 'q') {
+        /* "q" — abort a running tune; relay state is restored by TS_ABORT */
+        g_b_tune_abort = 1;
+        uart_puts("OK ABORT\r\n");
     } else if (l_cmd[0] == 'l' && l_len >= 6u) {
         /* "l HHHH" — recall nearest slot for freq in kHz, apply relays, report */
         unsigned int  l_freq_kHz = parse_hex16(l_cmd + 2);

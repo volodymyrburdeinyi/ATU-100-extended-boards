@@ -68,8 +68,9 @@ else
   echo "PASS  Band memory: band_slot_save() uses unsigned char for address locals"
 fi
 
-# Band memory: probe loop in tune() must use unsigned char for l_ind — signed char makes 0xFF sentinel check always false
-if ! awk '/probe band memory/,/l_probe_matched = 1/' "$TUNE_ALGO_H" 2>/dev/null | grep -q 'unsigned char l_sub, l_slot_idx, l_base, l_ind'; then
+# Band memory: probe loop (now in TS_PROBE state) must use unsigned char for l_ind —
+# signed char makes 0xFF sentinel check always false on fresh EEPROM
+if ! awk '/case TS_PROBE:/,/case TS_RESET:/' "$TUNE_ALGO_H" 2>/dev/null | grep -q 'unsigned char l_sub, l_slot_idx, l_base, l_ind'; then
   echo "FAIL  Band memory: probe loop l_ind not unsigned char — 0xFF sentinel never matches on fresh EEPROM"
   FAIL=1
 else
@@ -99,6 +100,14 @@ if awk '/static void sharp_ind/,/^}/' "$TUNE_ALGO_H" 2>/dev/null | grep -qE 'els
   FAIL=1
 else
   echo "PASS  Phase 3: sharp_ind() scans full range (no else break)"
+fi
+
+# Phase 6: TS_ABORT must restore pre_ind/cap/sw (abort restore not optional)
+if ! awk '/TS_ABORT/,/TS_IDLE/' "$TUNE_ALGO_H" 2>/dev/null | grep -q 'pre_ind'; then
+  echo "FAIL  Phase 6: TS_ABORT handler does not restore pre_ind in tune_algo.h"
+  FAIL=1
+else
+  echo "PASS  Phase 6: TS_ABORT restores pre_ind/cap/sw"
 fi
 
 echo "---------------------------"
