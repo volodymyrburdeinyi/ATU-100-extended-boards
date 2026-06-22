@@ -36,6 +36,7 @@
  * and never reference uart_puts or IntToStr, which do not exist in the sim. */
 #if defined(UART) && defined(MPLAB_COMPILER)
     extern unsigned char g_b_debug_mode;
+    void uart_cmd_proc(void);   /* forward decl — defined in uart_cmd.c */
 
     /* Emit one integer field "key=val" with no newline. Caller wraps in
      * if (g_b_debug_mode) so the flag is checked only once per line. */
@@ -122,6 +123,12 @@ static void coarse_tune(void)
    for (l_coarse_tune_count = 0; l_coarse_tune_count <= 31;)
    {
       CLRWDT();  /* up to 11 L × 11 C × ~30 ms each ≈ 3.6 s > 1 s WDT timeout */
+#if defined(UART) && defined(MPLAB_COMPILER)
+      /* Safe to call here: daemon sends only 'q' during a tune; any other
+       * command's TX response (~10 ms) is within the relay-step budget. */
+      uart_cmd_proc();
+      if (g_b_tune_abort) return;
+#endif
       set_ind(l_coarse_tune_count * g_c_L_mult);
       coarse_cap();
       get_swr();
@@ -159,6 +166,9 @@ static void sharp_cap(void)
 {
    unsigned char l_sharp_cap_range, l_sharp_cap_count, l_sharp_cap_max_range, l_sharp_cap_min_range;
    int l_sharp_cap_min_SWR;
+#if defined(UART) && defined(MPLAB_COMPILER)
+   unsigned char l_uart_check = 0;
+#endif
    l_sharp_cap_range = g_c_step_cap * g_c_C_mult;
 
    l_sharp_cap_max_range = g_c_cap + l_sharp_cap_range;
@@ -179,6 +189,9 @@ static void sharp_cap(void)
         l_sharp_cap_count += g_c_C_mult)
    {
       CLRWDT();  /* full-range scan with retries: up to ~30 steps × 3 reads × ~10 ms each */
+#if defined(UART) && defined(MPLAB_COMPILER)
+      if (++l_uart_check >= 5u) { l_uart_check = 0; uart_cmd_proc(); if (g_b_tune_abort) return; }
+#endif
       set_cap(l_sharp_cap_count);
       get_swr();
       if (g_i_SWR == 0)
@@ -211,6 +224,9 @@ static void sharp_ind(void)
 {
    unsigned char l_sharp_ind_range, l_sharp_ind_count, l_sharp_ind_max_range, l_sharp_ind_min_range;
    int l_sharp_ind_min_SWR;
+#if defined(UART) && defined(MPLAB_COMPILER)
+   unsigned char l_uart_check = 0;
+#endif
    l_sharp_ind_range = g_c_step_ind * g_c_L_mult;
 
    l_sharp_ind_max_range = g_c_ind + l_sharp_ind_range;
@@ -231,6 +247,9 @@ static void sharp_ind(void)
         l_sharp_ind_count += g_c_L_mult)
    {
       CLRWDT();  /* full-range scan with retries: up to ~30 steps × 3 reads × ~10 ms each */
+#if defined(UART) && defined(MPLAB_COMPILER)
+      if (++l_uart_check >= 5u) { l_uart_check = 0; uart_cmd_proc(); if (g_b_tune_abort) return; }
+#endif
       set_ind(l_sharp_ind_count);
       get_swr();
       if (g_i_SWR == 0)
@@ -617,6 +636,9 @@ static unsigned char tune_tick(void)
         if (g_b_tune_abort) { ctx->state = TS_ABORT; return 0; }
 #endif
         coarse_tune();
+#ifdef UART
+        if (g_b_tune_abort) { ctx->state = TS_ABORT; return 0; }
+#endif
         if (g_i_SWR == 0) {
             atu_reset();
             ctx->pending_exit = 7;
@@ -647,6 +669,9 @@ static unsigned char tune_tick(void)
         if (g_b_tune_abort) { ctx->state = TS_ABORT; return 0; }
 #endif
         sharp_ind();
+#ifdef UART
+        if (g_b_tune_abort) { ctx->state = TS_ABORT; return 0; }
+#endif
         if (g_i_SWR == 0) {
             atu_reset();
             ctx->pending_exit = 7;
@@ -685,6 +710,9 @@ static unsigned char tune_tick(void)
         if (g_b_tune_abort) { ctx->state = TS_ABORT; return 0; }
 #endif
         sharp_cap();
+#ifdef UART
+        if (g_b_tune_abort) { ctx->state = TS_ABORT; return 0; }
+#endif
         if (g_i_SWR == 0) {
             atu_reset();
             ctx->pending_exit = 7;
