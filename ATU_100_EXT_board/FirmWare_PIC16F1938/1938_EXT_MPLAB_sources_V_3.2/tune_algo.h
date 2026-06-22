@@ -18,7 +18,7 @@
  *               g_b_rready, g_char_p_cnt, g_b_tx_seen, g_char_tune_effort,
  *               e_c_b_L_linear, e_c_b_C_linear, e_c_num_L_q, e_c_num_C_q,
  *               e_i_tenths_init_max_swr, e_c_b_Loss_ind
- *   [UART]    : g_i_uart_freq_hint, g_b_slot_saved, g_c_tune_exit
+ *   [UART]    : g_i_uart_freq_hint, g_b_slot_saved, g_c_tune_exit, g_b_debug_mode
  *   HAL fns   : get_swr(), set_ind(), set_cap(), set_sw(), atu_reset(),
  *               lcd_ind(), eeprom_read(), eeprom_write(),
  *               Vdelay_ms(), Delay_ms(), CLRWDT()
@@ -29,6 +29,26 @@
  */
 #ifndef TUNE_ALGO_H
 #define TUNE_ALGO_H
+
+/* ── DBG telemetry helpers (firmware only; compiled away in sim) ──
+ * MPLAB_COMPILER is only defined when cross_compiler.h is included (firmware TU).
+ * The simulator defines UART but not MPLAB_COMPILER, so these helpers compile away
+ * and never reference uart_puts or IntToStr, which do not exist in the sim. */
+#if defined(UART) && defined(MPLAB_COMPILER)
+    extern unsigned char g_b_debug_mode;
+
+    /* Emit one integer field "key=val" with no newline. Caller wraps in
+     * if (g_b_debug_mode) so the flag is checked only once per line. */
+    static void tune_dbg_uint(const char *key, int val)
+    {
+        char l_s[7];
+        unsigned char l_i = 0;
+        uart_puts(key);
+        IntToStr(val, l_s);
+        while (l_i < 5u && l_s[l_i] == ' ') l_i++;
+        uart_puts(l_s + l_i);
+    }
+#endif /* UART && MPLAB_COMPILER */
 
 /* ── forward: platform-specific frequency measurement ── */
 static unsigned int measure_freq(void);
@@ -250,10 +270,26 @@ static void sub_tune(void)
    sharp_ind();
    if (g_i_SWR == 0) { atu_reset(); return; }
    get_swr();
+#if defined(UART) && defined(MPLAB_COMPILER)
+   if (g_b_debug_mode) {
+      uart_puts("DBG FINE_IND");
+      tune_dbg_uint(" ind=", (int)g_c_ind);
+      tune_dbg_uint(" swr=", g_i_SWR);
+      uart_puts("\r\n");
+   }
+#endif
    if (g_i_SWR < 120) return;
    sharp_cap();
    if (g_i_SWR == 0) { atu_reset(); return; }
    get_swr();
+#if defined(UART) && defined(MPLAB_COMPILER)
+   if (g_b_debug_mode) {
+      uart_puts("DBG FINE_CAP");
+      tune_dbg_uint(" cap=", (int)g_c_cap);
+      tune_dbg_uint(" swr=", g_i_SWR);
+      uart_puts("\r\n");
+   }
+#endif
    if (g_i_SWR < 120) return;
    //
    if (g_i_SWR < 200 && g_i_SWR < l_int_swr_mem && (l_int_swr_mem - g_i_SWR) > 100)
@@ -280,10 +316,26 @@ static void sub_tune(void)
    sharp_ind();
    if (g_i_SWR == 0) { atu_reset(); return; }
    get_swr();
+#if defined(UART) && defined(MPLAB_COMPILER)
+   if (g_b_debug_mode) {
+      uart_puts("DBG FINE_IND");
+      tune_dbg_uint(" ind=", (int)g_c_ind);
+      tune_dbg_uint(" swr=", g_i_SWR);
+      uart_puts("\r\n");
+   }
+#endif
    if (g_i_SWR < 120) return;
    sharp_cap();
    if (g_i_SWR == 0) { atu_reset(); return; }
    get_swr();
+#if defined(UART) && defined(MPLAB_COMPILER)
+   if (g_b_debug_mode) {
+      uart_puts("DBG FINE_CAP");
+      tune_dbg_uint(" cap=", (int)g_c_cap);
+      tune_dbg_uint(" swr=", g_i_SWR);
+      uart_puts("\r\n");
+   }
+#endif
    if (g_i_SWR < 120) return;
    //
    if (g_i_SWR > l_int_swr_mem)
@@ -300,6 +352,13 @@ static void sub_tune(void)
       get_swr();
    }
    //
+#if defined(UART) && defined(MPLAB_COMPILER)
+   if (g_b_debug_mode) {
+      uart_puts("DBG SW_FINE");
+      tune_dbg_uint(" swr=", g_i_SWR);
+      uart_puts("\r\n");
+   }
+#endif
    CLRWDT();
    return;
 }
@@ -390,6 +449,18 @@ static void tune(void)
    {
       g_c_tune_exit = 1;
       band_slot_save(l_probe_matched, l_freq_kHz);
+#if defined(UART) && defined(MPLAB_COMPILER)
+      if (g_b_debug_mode) {
+         uart_puts("DBG DONE");
+         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
+         tune_dbg_uint(" ind=", (int)g_c_ind);
+         tune_dbg_uint(" cap=", (int)g_c_cap);
+         tune_dbg_uint(" sw=", (int)g_c_SW);
+         tune_dbg_uint(" swr=", g_i_SWR);
+         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
+         uart_puts("\r\n");
+      }
+#endif
       return;
    }
    /* probe band memory: search the 3 sub-slots for the current band */
@@ -425,6 +496,18 @@ static void tune(void)
                g_c_tune_exit = 2;
                g_c_ind = l_tune_ind_mem; g_c_cap = l_tune_cap_mem; g_c_SW = l_tune_sw_mem;
                set_ind(g_c_ind); set_cap(g_c_cap); set_sw(g_c_SW);
+#if defined(UART) && defined(MPLAB_COMPILER)
+               if (g_b_debug_mode) {
+                  uart_puts("DBG DONE");
+                  tune_dbg_uint(" exit=", (int)g_c_tune_exit);
+                  tune_dbg_uint(" ind=", (int)g_c_ind);
+                  tune_dbg_uint(" cap=", (int)g_c_cap);
+                  tune_dbg_uint(" sw=", (int)g_c_SW);
+                  tune_dbg_uint(" swr=", g_i_SWR);
+                  tune_dbg_uint(" saved=", (int)g_b_slot_saved);
+                  uart_puts("\r\n");
+               }
+#endif
                return;
             }
             if (g_i_SWR < 150)
@@ -436,6 +519,18 @@ static void tune(void)
                   band_slot_save(0, l_freq_kHz);
                else
                   l_probe_matched = 1;
+#if defined(UART) && defined(MPLAB_COMPILER)
+               if (g_b_debug_mode) {
+                  uart_puts("DBG DONE");
+                  tune_dbg_uint(" exit=", (int)g_c_tune_exit);
+                  tune_dbg_uint(" ind=", (int)g_c_ind);
+                  tune_dbg_uint(" cap=", (int)g_c_cap);
+                  tune_dbg_uint(" sw=", (int)g_c_SW);
+                  tune_dbg_uint(" swr=", g_i_SWR);
+                  tune_dbg_uint(" saved=", (int)g_b_slot_saved);
+                  uart_puts("\r\n");
+               }
+#endif
                return;
             }
          }
@@ -460,18 +555,66 @@ static void tune(void)
       set_ind(g_c_ind);
       set_cap(g_c_cap);
       set_sw(g_c_SW);
+#if defined(UART) && defined(MPLAB_COMPILER)
+      if (g_b_debug_mode) {
+         uart_puts("DBG DONE");
+         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
+         tune_dbg_uint(" ind=", (int)g_c_ind);
+         tune_dbg_uint(" cap=", (int)g_c_cap);
+         tune_dbg_uint(" sw=", (int)g_c_SW);
+         tune_dbg_uint(" swr=", g_i_SWR);
+         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
+         uart_puts("\r\n");
+      }
+#endif
       return;
    }
    if (g_i_SWR < 110)
    {
       g_c_tune_exit = 5;
       band_slot_save(l_probe_matched, l_freq_kHz);
+#if defined(UART) && defined(MPLAB_COMPILER)
+      if (g_b_debug_mode) {
+         uart_puts("DBG DONE");
+         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
+         tune_dbg_uint(" ind=", (int)g_c_ind);
+         tune_dbg_uint(" cap=", (int)g_c_cap);
+         tune_dbg_uint(" sw=", (int)g_c_SW);
+         tune_dbg_uint(" swr=", g_i_SWR);
+         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
+         uart_puts("\r\n");
+      }
+#endif
       return;
    }
    if (e_i_tenths_init_max_swr > 110 && g_i_SWR > e_i_tenths_init_max_swr)
-   { g_c_tune_exit = 6; return; }
+   {
+      g_c_tune_exit = 6;
+#if defined(UART) && defined(MPLAB_COMPILER)
+      if (g_b_debug_mode) {
+         uart_puts("DBG DONE");
+         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
+         tune_dbg_uint(" ind=", (int)g_c_ind);
+         tune_dbg_uint(" cap=", (int)g_c_cap);
+         tune_dbg_uint(" sw=", (int)g_c_SW);
+         tune_dbg_uint(" swr=", g_i_SWR);
+         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
+         uart_puts("\r\n");
+      }
+#endif
+      return;
+   }
    //
    sub_tune();
+#if defined(UART) && defined(MPLAB_COMPILER)
+   if (g_b_debug_mode) {
+      uart_puts("DBG COARSE");
+      tune_dbg_uint(" ind=", (int)g_c_ind);
+      tune_dbg_uint(" cap=", (int)g_c_cap);
+      tune_dbg_uint(" swr=", g_i_SWR);
+      uart_puts("\r\n");
+   }
+#endif
    if (g_i_SWR == 0)
    {
       g_c_tune_exit = 7;
@@ -481,18 +624,54 @@ static void tune(void)
       set_ind(g_c_ind);
       set_cap(g_c_cap);
       set_sw(g_c_SW);
+#if defined(UART) && defined(MPLAB_COMPILER)
+      if (g_b_debug_mode) {
+         uart_puts("DBG DONE");
+         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
+         tune_dbg_uint(" ind=", (int)g_c_ind);
+         tune_dbg_uint(" cap=", (int)g_c_cap);
+         tune_dbg_uint(" sw=", (int)g_c_SW);
+         tune_dbg_uint(" swr=", g_i_SWR);
+         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
+         uart_puts("\r\n");
+      }
+#endif
       return;
    }
    if (g_i_SWR < 120)
    {
       g_c_tune_exit = 8;
       band_slot_save(l_probe_matched, l_freq_kHz);
+#if defined(UART) && defined(MPLAB_COMPILER)
+      if (g_b_debug_mode) {
+         uart_puts("DBG DONE");
+         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
+         tune_dbg_uint(" ind=", (int)g_c_ind);
+         tune_dbg_uint(" cap=", (int)g_c_cap);
+         tune_dbg_uint(" sw=", (int)g_c_SW);
+         tune_dbg_uint(" swr=", g_i_SWR);
+         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
+         uart_puts("\r\n");
+      }
+#endif
       return;
    }
    if (e_c_num_C_q == 5 && e_c_num_L_q == 5)
    {
       g_c_tune_exit = 9;
       band_slot_save(l_probe_matched, l_freq_kHz);
+#if defined(UART) && defined(MPLAB_COMPILER)
+      if (g_b_debug_mode) {
+         uart_puts("DBG DONE");
+         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
+         tune_dbg_uint(" ind=", (int)g_c_ind);
+         tune_dbg_uint(" cap=", (int)g_c_cap);
+         tune_dbg_uint(" sw=", (int)g_c_SW);
+         tune_dbg_uint(" swr=", g_i_SWR);
+         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
+         uart_puts("\r\n");
+      }
+#endif
       return;
    }
 
@@ -511,12 +690,36 @@ static void tune(void)
       set_ind(g_c_ind);
       set_cap(g_c_cap);
       set_sw(g_c_SW);
+#if defined(UART) && defined(MPLAB_COMPILER)
+      if (g_b_debug_mode) {
+         uart_puts("DBG DONE");
+         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
+         tune_dbg_uint(" ind=", (int)g_c_ind);
+         tune_dbg_uint(" cap=", (int)g_c_cap);
+         tune_dbg_uint(" sw=", (int)g_c_SW);
+         tune_dbg_uint(" swr=", g_i_SWR);
+         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
+         uart_puts("\r\n");
+      }
+#endif
       return;
    }
    if (g_i_SWR < 120)
    {
       g_c_tune_exit = 11;
       band_slot_save(l_probe_matched, l_freq_kHz);
+#if defined(UART) && defined(MPLAB_COMPILER)
+      if (g_b_debug_mode) {
+         uart_puts("DBG DONE");
+         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
+         tune_dbg_uint(" ind=", (int)g_c_ind);
+         tune_dbg_uint(" cap=", (int)g_c_cap);
+         tune_dbg_uint(" sw=", (int)g_c_SW);
+         tune_dbg_uint(" swr=", g_i_SWR);
+         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
+         uart_puts("\r\n");
+      }
+#endif
       return;
    }
    if (e_c_num_C_q > 5)
@@ -534,6 +737,18 @@ static void tune(void)
       set_ind(g_c_ind);
       set_cap(g_c_cap);
       set_sw(g_c_SW);
+#if defined(UART) && defined(MPLAB_COMPILER)
+      if (g_b_debug_mode) {
+         uart_puts("DBG DONE");
+         tune_dbg_uint(" exit=", (int)g_c_tune_exit);
+         tune_dbg_uint(" ind=", (int)g_c_ind);
+         tune_dbg_uint(" cap=", (int)g_c_cap);
+         tune_dbg_uint(" sw=", (int)g_c_SW);
+         tune_dbg_uint(" swr=", g_i_SWR);
+         tune_dbg_uint(" saved=", (int)g_b_slot_saved);
+         uart_puts("\r\n");
+      }
+#endif
       return;
    }
    if (e_c_num_L_q == 5)
@@ -551,6 +766,18 @@ static void tune(void)
    get_swr();
    g_c_tune_exit = 13;
    band_slot_save(l_probe_matched, l_freq_kHz);
+#if defined(UART) && defined(MPLAB_COMPILER)
+   if (g_b_debug_mode) {
+      uart_puts("DBG DONE");
+      tune_dbg_uint(" exit=", (int)g_c_tune_exit);
+      tune_dbg_uint(" ind=", (int)g_c_ind);
+      tune_dbg_uint(" cap=", (int)g_c_cap);
+      tune_dbg_uint(" sw=", (int)g_c_SW);
+      tune_dbg_uint(" swr=", g_i_SWR);
+      tune_dbg_uint(" saved=", (int)g_b_slot_saved);
+      uart_puts("\r\n");
+   }
+#endif
    CLRWDT();
    return;
 }

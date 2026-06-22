@@ -31,12 +31,15 @@ command line (after pressing :):
   a          toggle auto mode
   r          reset relays
   ?          ATU status line (IND CAP SW SWR AUTO)
+  d 1        enable DBG telemetry (logged to /tmp/atu-dbg.log)
+  d 0        disable DBG telemetry
 
 serial port: RB1=TX, RB2=RX, 9600 8N1 (USB-UART converter)
 """
 
 import sys
 import os
+import pathlib
 import socket
 import struct
 import termios
@@ -121,9 +124,18 @@ def parse_status(d):
 # ── async reader routing ─────────────────────────────────────────────────────
 
 _response_queue = queue.Queue()          # control-protocol lines from PIC
-_DISP_RE  = re.compile(r'^\d{4}:')      # display-protocol prefix  e.g. "2016:"
-_SWR_RE   = re.compile(r'SWR=(\d+\.\d+)')  # SWR inside display string
 _CTRL_SWR_RE = re.compile(r'\bSWR=(\d+)\b')  # SWR in control-protocol (×100 integer)
+
+_DBG_LOG = pathlib.Path('/tmp/atu-dbg.log')
+
+
+def _log_dbg(line):
+    """Route DBG telemetry lines to log file — never to response queue."""
+    try:
+        with _DBG_LOG.open('a') as f:
+            f.write(line + '\n')
+    except OSError:
+        pass
 
 
 def _fmt_ctrl_resp(resp):
@@ -188,19 +200,6 @@ def valid_response(cmd, resp):
     return True
 
 
-def _parse_display(line):
-    """Extract SWR from a display-protocol line and update shared state."""
-    m = _SWR_RE.search(line)
-    if m:
-        try:
-            swr = int(round(float(m.group(1)) * 100))
-            with lock:
-                st['swr'] = swr
-            st['need_redraw'].set()
-        except ValueError:
-            pass
-
-
 def serial_reader(port):
     """Background thread: reads all PIC output, routes lines to display parser
     or response queue."""
@@ -233,8 +232,8 @@ def serial_reader(port):
                 line = line_b.strip().decode(errors='replace')
                 if not line:
                     continue
-                if _DISP_RE.match(line):
-                    _parse_display(line)
+                if line.startswith('DBG '):
+                    _log_dbg(line)
                 else:
                     _response_queue.put(line)
         except OSError:
@@ -261,6 +260,7 @@ st = {
     'khz':              0,
     'tx':               False,
     'swr':              0,
+    'debug':            False,
     'status':           'ready — press h for help',
     'status_time':      0.0,
     'retrying':         False,
@@ -506,6 +506,11 @@ def _dispatch_line(port, cmd):
                 sys.stdin.read(1)
                 break
         st['need_redraw'].set()
+    elif cmd in ('d 1', 'd 0'):
+        val = '1' if cmd == 'd 1' else '0'
+        with lock:
+            st['debug'] = (val == '1')
+        threading.Thread(target=run_cmd, args=(port, cmd), daemon=True).start()
     else:
         threading.Thread(target=run_cmd, args=(port, cmd), daemon=True).start()
 

@@ -5,6 +5,8 @@
 
 #ifdef UART
 
+extern unsigned char g_b_debug_mode;
+
 void uart_send_status(void);
 void uart_cmd_proc(void);
 

@@ -2,6 +2,8 @@
 
 #ifdef UART
 
+unsigned char g_b_debug_mode = 0;
+
 /* globals declared in main.h — referenced here */
 extern unsigned char g_c_ind, g_c_cap;
 extern char g_c_SW;
@@ -213,6 +215,11 @@ static void uart_exec_cmd(const char *l_cmd, unsigned char l_len)
         eeprom_write(l_addr, l_val);
         uart_puts("OK EEPROM[0x"); uart_puthex8(l_addr);
         uart_puts("]=0x");         uart_puthex8(l_val);
+        uart_puts("\r\n");
+    } else if (l_cmd[0] == 'd') {
+        g_b_debug_mode = (l_len >= 3u && l_cmd[2] == '1') ? 1 : 0;
+        uart_puts("OK DBG=");
+        uart_putuint(g_b_debug_mode);
         uart_puts("\r\n");
     } else if (l_cmd[0] == '?') {
         uart_send_status();
