@@ -4,9 +4,7 @@
     <logicalFolder name="HeaderFiles"
                    displayName="Header Files"
                    projectFiles="true">
-      <itemPath>font5x8.h</itemPath>
       <itemPath>main.h</itemPath>
-      <itemPath>oled_control.h</itemPath>
       <itemPath>cross_compiler.h</itemPath>
     </logicalFolder>
     <logicalFolder name="LinkerScript"
@@ -17,7 +15,6 @@
                    displayName="Source Files"
                    projectFiles="true">
       <itemPath>main.c</itemPath>
-      <itemPath>oled_control.c</itemPath>
       <itemPath>pic_init.c</itemPath>
       <itemPath>cross_compiler.c</itemPath>
       <itemPath>uart.c</itemPath>

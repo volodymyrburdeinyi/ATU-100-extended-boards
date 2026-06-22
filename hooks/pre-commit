@@ -29,12 +29,12 @@ fi
 echo "--- ATU firmware checks ---"
 FAIL=0
 
-# Fix 1: lcd_swr() must use parameter swr, not global g_i_SWR
-if grep -qE 'if\s*\(\s*swr\s*==\s*0\s*\)' "$MAIN_C" 2>/dev/null; then
-  echo "PASS  Fix 1: lcd_swr() uses if (swr == 0)"
-else
-  echo "FAIL  Fix 1: lcd_swr() parameter check not found — check manually"
+# Fix 1: lcd_swr() was a display function — must be absent after Phase 4
+if grep -q 'void lcd_swr' "$MAIN_C" 2>/dev/null; then
+  echo "FAIL  Fix 1: lcd_swr() still present in main.c — display code not fully removed"
   FAIL=1
+else
+  echo "PASS  Fix 1: lcd_swr() absent (display removed Phase 4)"
 fi
 
 # Fix 2a: coarse_cap() must not have else break and must use strict min_swr = g_i_SWR

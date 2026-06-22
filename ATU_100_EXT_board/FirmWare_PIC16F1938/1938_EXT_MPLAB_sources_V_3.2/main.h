@@ -30,11 +30,6 @@ static char e_c_b_L_invert = 0;
 /* in automatic mode, threshold triggering the tuning process if the
  * SWR is above this level.   in tenths.   so 13 would be an SWR of 1.3 */
 static int e_i_tenths_SWR_Auto_delta;
-/* boolean:  if display backlight should be on when any buttons are pressed
- and if RF power is seen */
-static char e_c_b_Dysp_delay = 0;
-/* feeder loss in tenths of a db.  */
-static char e_c_tenths_Fid_loss;
 /* delay in ms for relays to settle and to take a measurement */
 static int e_i_ms_Rel_Del;
 /*  power in watts for starting tuning.  min and max */
@@ -45,7 +40,7 @@ static int e_i_tenths_init_max_swr;
 static char e_c_b_P_High = 0;
 /* ratio of turns of the tandem match (default should be 10) */
 static char e_c_K_Mult = 32;
-/* bool indicating whether to display Power level also */
+/* headless station: loss indication always disabled (no display to show it on) */
 static char e_c_b_Loss_ind = 0;
 /* boolean.  to support Relay off function */
 static char e_c_b_Relay_off = 0;
@@ -54,18 +49,13 @@ static char e_c_b_Relay_off = 0;
 void pic_init(void);
 
 void tune_btn_push(void);
-void lcd_prep(void);
-void lcd_swr(int);
-void lcd_pwr(void);
-void show_pwr(int, int);
-void lcd_ind(void);
 void show_reset(void);
+void lcd_ind(void);  /* no-op stub — required by tune_algo.h; no display hardware */
 void cells_init(void);
-void test_init(void);
+void Test_init(void);
 void button_proc(void);
 void button_proc_test(void);
 void button_delay(void);
-void show_loss(void);
 /* relay HAL: set_ind, set_cap, set_sw, atu_reset */
 #include "relay.h"
 /* SWR/power measurement: correction, get_reverse, get_forward, get_pwr, get_swr */

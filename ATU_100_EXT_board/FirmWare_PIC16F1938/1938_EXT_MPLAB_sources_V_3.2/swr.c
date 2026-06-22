@@ -12,8 +12,7 @@ extern char e_c_b_P_High;
 extern char e_c_K_Mult;
 extern int e_i_watts_min_for_start, e_i_watts_max_for_start;
 
-/* display functions defined in main.c */
-void show_pwr(int, int);
+/* show_reset() defined in main.c — called from get_swr() button-abort path */
 void show_reset(void);
 
 int correction(int input)
@@ -165,7 +164,6 @@ void get_swr()
    else
    {
       g_char_p_cnt = 0;
-      show_pwr(g_i_P_max, g_i_SWR);
       g_i_P_max = 0;
    }
    if (g_i_PWR >= e_i_watts_min_for_start)
@@ -188,7 +186,6 @@ void get_swr()
       else
       {
          g_char_p_cnt = 0;
-         show_pwr(g_i_P_max, g_i_SWR);
          g_i_P_max = 0;
       }
       //
