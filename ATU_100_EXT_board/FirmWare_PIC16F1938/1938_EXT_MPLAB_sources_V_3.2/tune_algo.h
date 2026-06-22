@@ -133,9 +133,7 @@ static void coarse_tune(void)
    return;
 }
 
-/* ── fine capacitor scan (sharp pass) ──
- * NOTE: this function exits early with `else break` — Phase 3 will replace
- * this with a full-range minimum-tracking scan to fix noise sensitivity.    */
+/* ── fine capacitor scan (sharp pass) — full-range min-tracking ── */
 static void sharp_cap(void)
 {
    unsigned char l_sharp_cap_range, l_sharp_cap_count, l_sharp_cap_max_range, l_sharp_cap_min_range;
@@ -180,15 +178,13 @@ static void sharp_cap(void)
          if (g_i_SWR < 120)
             break;
       }
-      else
-         break;   /* TODO Phase 3: remove this early exit */
+      /* no else break — scan full range */
    }
    set_cap(g_c_cap);
    return;
 }
 
-/* ── fine inductor scan (sharp pass) ──
- * NOTE: same early-exit issue as sharp_cap — fixed in Phase 3.             */
+/* ── fine inductor scan (sharp pass) — full-range min-tracking ── */
 static void sharp_ind(void)
 {
    unsigned char l_sharp_ind_range, l_sharp_ind_count, l_sharp_ind_max_range, l_sharp_ind_min_range;
@@ -233,8 +229,7 @@ static void sharp_ind(void)
          if (g_i_SWR < 120)
             break;
       }
-      else
-         break;   /* TODO Phase 3: remove this early exit */
+      /* no else break — scan full range */
    }
    set_ind(g_c_ind);
    return;

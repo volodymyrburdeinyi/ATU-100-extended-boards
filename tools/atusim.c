@@ -86,6 +86,14 @@ static int sim_inhibit_on_call = -1;
 static int sim_call_n = 0;
 static unsigned int sim_freq = 0;
 
+/* Physical relay state: separate from the algorithm's g_c_ind/g_c_cap tracking
+ * variables.  In real firmware, set_cap/set_ind drive hardware pins and have no
+ * effect on g_c_ind/g_c_cap.  The SWR model must see the physical relay state
+ * (what the antenna actually experiences), not the algorithm's bookkeeping vars. */
+static unsigned char sim_relay_ind = 0;
+static unsigned char sim_relay_cap = 0;
+static char          sim_relay_sw  = 0;
+
 /* ── hardware stubs ── */
 #define CLRWDT() do {} while(0)
 static void Vdelay_ms(int ms) { (void)ms; }
@@ -94,13 +102,21 @@ static void show_pwr(int p, int s)  { (void)p; (void)s; }  /* display stub */
 static void lcd_ind(void)           {}                       /* display stub */
 static void show_reset(void)        {}                       /* display stub */
 
-static void set_ind(unsigned char ind) { g_c_ind = ind; Vdelay_ms(0); }
-static void set_cap(unsigned char cap) { g_c_cap = cap; Vdelay_ms(0); }
-static void set_sw(char sw)            { g_c_SW  = sw;  Vdelay_ms(0); }
+/* Relay stubs: update the physical relay state (sim_relay_*) without touching
+ * the algorithm's tracking globals (g_c_ind, g_c_cap, g_c_SW).
+ *
+ * In real firmware relay.c only drives hardware pins; it never writes to the
+ * g_c_* tracking variables.  The SWR model must see the physical relay state
+ * (what the antenna actually experiences), which is maintained here separately.
+ * This ensures sharp_cap/sharp_ind correctly retain the best-position value in
+ * g_c_cap/g_c_ind across iterations that do not improve the SWR. */
+static void set_ind(unsigned char ind) { sim_relay_ind = ind; Vdelay_ms(0); }
+static void set_cap(unsigned char cap) { sim_relay_cap = cap; Vdelay_ms(0); }
+static void set_sw(char sw)            { sim_relay_sw = sw; g_c_SW = sw; Vdelay_ms(0); }
 
 static void atu_reset(void) {
     g_c_ind = 0; g_c_cap = 0;
-    set_ind(g_c_ind); set_cap(g_c_cap);
+    set_ind(0); set_cap(0);
 }
 
 /* ── frequency measurement: sim returns sim_freq (firmware returns 0) ── */
@@ -119,7 +135,7 @@ static void get_pwr(void) {
         return;
     }
     g_i_PWR = 5;
-    g_i_SWR = current_model ? current_model(g_c_ind, g_c_cap, g_c_SW) : 999;
+    g_i_SWR = current_model ? current_model(sim_relay_ind, sim_relay_cap, sim_relay_sw) : 999;
 }
 
 static void get_swr(void) {
@@ -204,6 +220,37 @@ static int model_simple_20m(unsigned char ind, unsigned char cap, unsigned char 
     return (int)swr;
 }
 
+/*
+ * S11 model: jittery ADC spike at cap=16 during sharp_cap scan.
+ * True minimum is at cap=17 (SWR=130). A spike at cap=16 (all reads return
+ * 999) would cause the old `else break` to fire before the true minimum is
+ * reached. The new full-range scan continues past the spike and finds cap=17.
+ *
+ * Cap map (ind and sw ignored for this model):
+ *   cap=13: 180   baseline at scan start
+ *   cap=14: 165   improving
+ *   cap=15: 155   improving
+ *   cap=16: 999   unconditional spike — all three reads return 999
+ *   cap=17: 130   true minimum
+ *   cap=18: 140   degrading
+ *   cap=19: 150   degrading
+ *   other : 999   outside scan window
+ */
+static int model_jitter_spike(unsigned char ind, unsigned char cap, unsigned char sw)
+{
+    (void)ind; (void)sw;
+    switch (cap) {
+        case 13: return 180;
+        case 14: return 165;
+        case 15: return 155;
+        case 16: return 999;  /* unconditional spike — retries also return 999 */
+        case 17: return 130;
+        case 18: return 140;
+        case 19: return 150;
+        default: return 999;
+    }
+}
+
 /* ── test infrastructure ── */
 
 static void reset_state(void)
@@ -215,6 +262,7 @@ static void reset_state(void)
     g_char_p_cnt = 0; g_char_tune_effort = 0; g_b_rready = 0; g_b_tx_seen = 0;
     g_b_slot_saved = 0; g_c_tune_exit = 0; g_i_uart_freq_hint = 0;
     sim_call_n = 0; sim_inhibit_on_call = -1; sim_freq = 0;
+    sim_relay_ind = 0; sim_relay_cap = 0; sim_relay_sw = 0;
     e_i_tenths_init_max_swr = 0;
     eeprom_reset();
 }
@@ -408,6 +456,27 @@ int main(void)
         unsigned char s10_20m_ind = eeprom_read(s10_20m + EEPROM_SLOT_IND);
         CHECK("S10 cross-band isolation — 40m tune, 20m band slots untouched",
               s10_20m_ind == 0xFF && r.swr < 130, r);
+    }
+
+    /* S11: jittery ADC spike at cap=16 — sharp_cap must reach cap=17 (true min)
+     *
+     * State setup: coarse scan already "landed" at cap=16 with step_cap=3, C_mult=1.
+     * sharp_cap will compute range=3, min_range=13, max_range=19 and scan 13..19.
+     * The spike at cap=16 (all reads=999) would have fired `else break` in the old
+     * code, stopping at cap=15 (SWR=155). The new full-range scan continues and
+     * finds cap=17 (SWR=130).                                                        */
+    {
+        reset_state();
+        current_model = model_jitter_spike;
+        /* Place state as if coarse scan landed at cap=16 with step_cap=3, C_mult=1 */
+        g_c_cap      = 16;
+        g_c_step_cap = 3;
+        g_c_C_mult   = 1;
+        g_c_ind      = 0;
+        sharp_cap();
+        result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
+        CHECK("S11 jittery ADC spike — sharp_cap finds true min at cap=17",
+              r.cap == 17, r);
     }
 
     printf("\n%d/%d passed\n", passed, total);

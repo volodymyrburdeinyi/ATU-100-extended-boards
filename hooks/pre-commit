@@ -86,6 +86,21 @@ else
   echo "WARN  Fix 3: get_swr() not found in sub_tune() — check manually"
 fi
 
+# Phase 3: sharp_cap and sharp_ind must NOT contain else break (early exit kills noise tolerance)
+if awk '/static void sharp_cap/,/^}/' "$TUNE_ALGO_H" 2>/dev/null | grep -qE 'else[[:space:]]*break[[:space:]]*;'; then
+  echo "FAIL  Phase 3: else break still present in sharp_cap() — noise sensitivity bug"
+  FAIL=1
+else
+  echo "PASS  Phase 3: sharp_cap() scans full range (no else break)"
+fi
+
+if awk '/static void sharp_ind/,/^}/' "$TUNE_ALGO_H" 2>/dev/null | grep -qE 'else[[:space:]]*break[[:space:]]*;'; then
+  echo "FAIL  Phase 3: else break still present in sharp_ind() — noise sensitivity bug"
+  FAIL=1
+else
+  echo "PASS  Phase 3: sharp_ind() scans full range (no else break)"
+fi
+
 echo "---------------------------"
 if [ $FAIL -ne 0 ]; then
   echo "Firmware regression detected. Run /atu-review for full analysis."
