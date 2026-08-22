@@ -1,9 +1,6 @@
 #include "cross_compiler.h"
-
-/* globals declared in main.h — referenced here */
-extern unsigned char g_c_ind, g_c_cap;
-extern char e_c_b_L_invert;
-extern int e_i_ms_Rel_Del;
+#include "globals.h"
+#include "relay.h"
 
 void set_ind(unsigned char Ind)
 {

@@ -4,10 +4,24 @@
 #
 # Install: cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 
-MAIN_H="ATU_100_EXT_board/FirmWare_PIC16F1938/1938_EXT_MPLAB_sources_V_3.2/main.h"
-MAIN_C="ATU_100_EXT_board/FirmWare_PIC16F1938/1938_EXT_MPLAB_sources_V_3.2/main.c"
+FW="ATU_100_EXT_board/FirmWare_PIC16F1938/1938_EXT_MPLAB_sources_V_3.2"
+MAIN_H="$FW/main.h"
+MAIN_C="$FW/main.c"
+CROSS_C="$FW/cross_compiler.c"
 # Algorithm functions moved to tune_algo.h (Phase 1: single source of truth for firmware + sim)
-TUNE_ALGO_H="ATU_100_EXT_board/FirmWare_PIC16F1938/1938_EXT_MPLAB_sources_V_3.2/tune_algo.h"
+TUNE_ALGO_H="$FW/tune_algo.h"
+
+# Host compile+link of every firmware translation unit. XC8 is not available
+# here, and without this a commit can be syntactically broken or fail to link
+# and nothing notices until programming time.
+if [ -x "tools/hostbuild/build.sh" ]; then
+  if ! tools/hostbuild/build.sh >/tmp/atu-hostbuild.out 2>&1; then
+    echo "FAIL  host build: firmware does not compile or link"
+    tail -30 /tmp/atu-hostbuild.out
+    exit 1
+  fi
+  echo "PASS  host build: all translation units compile and link"
+fi
 
 # Run atusim on every commit (algorithm changes or not)
 if command -v gcc &>/dev/null && [ -f "tools/atusim.c" ]; then
@@ -22,7 +36,7 @@ if command -v gcc &>/dev/null && [ -f "tools/atusim.c" ]; then
 fi
 
 # Only run static checks when firmware files are staged
-if ! git diff --cached --name-only | grep -qE "1938_EXT_MPLAB_sources_V_3\.2/(main\.h|main\.c|tune_algo\.h)$"; then
+if ! git diff --cached --name-only | grep -qE "1938_EXT_MPLAB_sources_V_3\.2/.*\.(c|h)$"; then
   exit 0
 fi
 
@@ -77,14 +91,39 @@ else
   echo "PASS  Band memory: probe loop uses unsigned char for slot locals"
 fi
 
-# Fix 3: sub_tune() SW-revert block must call get_swr(), not assign g_i_SWR = l_int_swr_mem
+# Fix 3: SW-revert must re-measure, never restore a remembered SWR value
 if grep -q 'g_i_SWR = l_int_swr_mem' "$TUNE_ALGO_H" 2>/dev/null; then
-  echo "FAIL  Fix 3: sub_tune() still uses g_i_SWR = l_int_swr_mem (stale assignment)"
+  echo "FAIL  Fix 3: SW-revert still assigns a stale g_i_SWR instead of measuring"
   FAIL=1
-elif awk '/void sub_tune/,/^}/' "$TUNE_ALGO_H" 2>/dev/null | grep -q 'get_swr()'; then
-  echo "PASS  Fix 3: sub_tune() calls get_swr() after SW-revert"
 else
-  echo "WARN  Fix 3: get_swr() not found in sub_tune() — check manually"
+  echo "PASS  Fix 3: SW-revert re-measures (no stale g_i_SWR assignment)"
+fi
+
+# TS_INIT must clear the per-tune latches. g_b_tx_seen carried between tunes
+# makes every tune after the first abort before the transmitter has keyed.
+if ! awk '/case TS_INIT:/,/case TS_PROBE:/' "$TUNE_ALGO_H" 2>/dev/null | grep -q 'g_b_tx_seen *= *0'; then
+  echo "FAIL  TS_INIT does not clear g_b_tx_seen — only the first tune after boot will work"
+  FAIL=1
+else
+  echo "PASS  TS_INIT clears per-tune latches (g_b_tx_seen)"
+fi
+
+# Both terminal states must hand back the step multipliers the extra-fine
+# passes borrowed, or the next tune scans a fraction of the range.
+if ! awk '/case TS_SAVE:/,/^}/' "$TUNE_ALGO_H" 2>/dev/null | grep -q 'tune_restore_mults' \
+   || ! awk '/case TS_ABORT:/,/^}/' "$TUNE_ALGO_H" 2>/dev/null | grep -q 'tune_restore_mults'; then
+  echo "FAIL  TS_SAVE/TS_ABORT must call tune_restore_mults() — L/C multiplier leak"
+  FAIL=1
+else
+  echo "PASS  TS_SAVE and TS_ABORT restore the L/C step multipliers"
+fi
+
+# IntToStr must NUL-terminate: every caller hands the buffer to uart_puts()
+if ! grep -q "\*p = '\\\\0';" "$CROSS_C" 2>/dev/null; then
+  echo "FAIL  IntToStr() does not NUL-terminate — uart_puts() will run off the buffer"
+  FAIL=1
+else
+  echo "PASS  IntToStr() NUL-terminates its output"
 fi
 
 # Phase 3: sharp_cap and sharp_ind must NOT contain else break (early exit kills noise tolerance)

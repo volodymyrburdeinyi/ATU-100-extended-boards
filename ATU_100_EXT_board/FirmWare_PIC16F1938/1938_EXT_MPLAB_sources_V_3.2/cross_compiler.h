@@ -188,11 +188,24 @@ void debugprint(void);
 #define DELAY_100_US_CLOCK 400
 
 #define Delay_100_us() _delay((unsigned long)(DELAY_100_US_CLOCK));
+
+/*  one bit period at 9600 baud: 104.17 us = 417 instruction cycles at 4 MHz Fcy.
+ *  ~7 cycles are spent per bit on the shift/output/loop around the delay, so the
+ *  delay itself is short by that much. 100 us (the old value) was 4% fast, which
+ *  put the receiver's stop-bit sample about a third of a bit period out before
+ *  the internal oscillator's own tolerance was counted. */
+#define DELAY_BIT_9600_CLOCK 410
+
+#define Delay_bit_9600() _delay((unsigned long)(DELAY_BIT_9600_CLOCK));
     void Delay_ms(const unsigned int time_in_ms);
+
+/*  write an EEPROM cell only if its content differs. The LAST_* cells are
+ *  rewritten after every tune; the part is rated for 100k cycles. */
+    void eeprom_store(unsigned char addr, unsigned char value);
 
     unsigned int ADC_Get_Sample(char channel);
 
-    char Button(volatile unsigned char *port, char pin, char time, char active_state);
+    unsigned char Button(volatile unsigned char *port, char pin, char time, char active_state);
 
     unsigned char Bcd2Dec(unsigned char bcdnum);
 
@@ -208,23 +221,16 @@ void debugprint(void);
     void uart_puts(const char *s);
     void uart_tx_bit_bang(unsigned char val);
     void uart_cmd_proc(void);
-    /* freq hint injected by "t HHHH" command; consumed once by tune() */
-    extern unsigned int  g_i_uart_freq_hint;
-    /* set to 1 by band_slot_save() when an EEPROM write occurs; cleared at tune() start */
-    extern unsigned char g_b_slot_saved;
-    /* exit-path code set by tune() — cleared at tune() start, shown in uart_send_status */
-    extern unsigned char g_c_tune_exit;
+    /* UART-related globals are declared in globals.h */
 #endif
 
+    /*  writes 6 right-aligned, blank-padded characters plus a NUL:
+     *  output must have room for 7 bytes. */
     void IntToStr(int number, char *output);
 
     /*  forward references*/
 
     void Test_init(void);
-
-//  the posstr is the position.  
-//   the thousands digit is the row, the 3 ls digits is the column
-void uart_wr_str(char posstr[],char str[], char leng);
 
 //  the Version 3.2 uses A6 and A7 for the Tx lines to the transmitter
 //  And the data and clock lines to the Display uses B6 and B7, (also for the 
@@ -251,6 +257,8 @@ void uart_wr_str(char posstr[],char str[], char leng);
 //  since these pins are defined as INPUTS
 #define n_Tx LATBbits.LATB2
 #define p_Tx LATBbits.LATB0
+#define TX_REQUEST_ON()   ((void)0)
+#define TX_REQUEST_OFF()  ((void)0)
     
 #define GREEN_LED LATBbits.LATB2
 #define RED_LED LATBbits.LATB0 
@@ -266,13 +274,20 @@ void uart_wr_str(char posstr[],char str[], char leng);
 #define UART_OUT_PIN LATBbits.LATB1
 
 #ifdef UART
-//  this effectively disables n_Tx, p_Tx, Green_led and Red_led
-//  since these pins are defined as INPUTS
-#define n_Tx LATBbits.LATB1
-#define p_Tx LATBbits.LATB0
-#else  
+/*  No TX-request output exists in the UART build. RB1 carries the bit-banged
+ *  serial line and RB0 is the tune-button input, so the pins the ATU-100
+ *  normally uses to key the transmitter are both taken. Driving n_Tx here (as
+ *  the pre-UART code did) pulled the serial line low for the duration of a
+ *  button tune, which the host sees as a break condition.
+ *
+ *  The transmitter is keyed by the daemon over CAT instead. */
+#define TX_REQUEST_ON()   ((void)0)
+#define TX_REQUEST_OFF()  ((void)0)
+#else
 #define n_Tx LATAbits.LATA6
 #define p_Tx LATAbits.LATA7
+#define TX_REQUEST_ON()   do { p_Tx = 1; n_Tx = 0; } while (0)
+#define TX_REQUEST_OFF()  do { p_Tx = 0; n_Tx = 1; } while (0)
 #endif
 
 #define GREEN_LED LATBbits.LATB6

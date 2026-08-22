@@ -1,13 +1,14 @@
 /* tune_algo.h — ATU-100 EXT tuning algorithm
  *
  * Single source of truth for:
- *   coarse_cap / coarse_tune / sharp_cap / sharp_ind / sub_tune
+ *   coarse_cap / coarse_tune / sharp_cap / sharp_ind
  *   band_slot_save / freq_to_band_idx / BAND_LO / BAND_HI
- *   tune
+ *   tune_start / tune_tick / tune_busy  (cooperative state machine)
  *
- * Included by:
- *   main.h            — firmware build (MPLAB X, XC8)
+ * Included by exactly ONE translation unit per program — it defines g_tune_ctx:
+ *   tune_algo.c       — firmware build (MPLAB X, XC8)
  *   tools/atusim.c    — simulator build (gcc)
+ * Other firmware modules use tune_api.h.
  *
  * Requirements from the including translation unit:
  *   Types     : unsigned char, unsigned int, int, char
@@ -54,12 +55,18 @@
 /* ── forward: platform-specific frequency measurement ── */
 static unsigned int measure_freq(void);
 
+#ifdef UART
+/* Set by the "q" command. Declared here, ahead of the scan loops that poll it —
+ * they are the first code in this file to reference it. */
+extern unsigned char g_b_tune_abort;
+#endif
+
 /* ── band table — 10 ham bands, lo/hi in kHz ── */
 /* 160m  80m  40m   30m    20m    17m    15m    12m    10m    6m */
 static const unsigned int BAND_LO[10] = {1800, 3500, 7000, 10100, 14000, 18068, 21000, 24890, 28000, 50000};
 static const unsigned int BAND_HI[10] = {2000, 4000, 7300, 10150, 14350, 18168, 21450, 24990, 29700, 54000};
 
-static unsigned char freq_to_band_idx(unsigned int kHz)
+unsigned char freq_to_band_idx(unsigned int kHz)
 {
    unsigned char l_b;
    for (l_b = 0; l_b < (unsigned char)EEPROM_BAND_N; l_b++)
@@ -277,114 +284,6 @@ static void sharp_ind(void)
    return;
 }
 
-/* ── two-pass SW search (cap-on-antenna vs cap-on-tx) ── */
-static void sub_tune(void)
-{
-   int l_int_swr_mem;
-   unsigned char l_int_ind_mem, l_int_cap_mem;
-   //
-   l_int_swr_mem = g_i_SWR;
-   /* pass 1 — SW at current position */
-   coarse_tune();
-   if (g_i_SWR == 0) { atu_reset(); return; }
-   get_swr();
-   if (g_i_SWR < 120) return;
-   sharp_ind();
-   if (g_i_SWR == 0) { atu_reset(); return; }
-   get_swr();
-#if defined(UART) && defined(MPLAB_COMPILER)
-   if (g_b_debug_mode) {
-      uart_puts("DBG FINE_IND");
-      tune_dbg_uint(" ind=", (int)g_c_ind);
-      tune_dbg_uint(" swr=", g_i_SWR);
-      uart_puts("\r\n");
-   }
-#endif
-   if (g_i_SWR < 120) return;
-   sharp_cap();
-   if (g_i_SWR == 0) { atu_reset(); return; }
-   get_swr();
-#if defined(UART) && defined(MPLAB_COMPILER)
-   if (g_b_debug_mode) {
-      uart_puts("DBG FINE_CAP");
-      tune_dbg_uint(" cap=", (int)g_c_cap);
-      tune_dbg_uint(" swr=", g_i_SWR);
-      uart_puts("\r\n");
-   }
-#endif
-   if (g_i_SWR < 120) return;
-   //
-   if (g_i_SWR < 200 && g_i_SWR < l_int_swr_mem && (l_int_swr_mem - g_i_SWR) > 100)
-      return;
-   l_int_swr_mem = g_i_SWR;
-   l_int_ind_mem = g_c_ind;
-   l_int_cap_mem = g_c_cap;
-   //
-   if (g_c_SW == 1)
-      g_c_SW = 0;
-   else
-      g_c_SW = 1;
-   atu_reset();
-   set_sw(g_c_SW);
-   Delay_ms(50);
-   get_swr();
-   if (g_i_SWR < 120)
-      return;
-   /* pass 2 — SW at opposite position */
-   coarse_tune();
-   if (g_i_SWR == 0) { atu_reset(); return; }
-   get_swr();
-   if (g_i_SWR < 120) return;
-   sharp_ind();
-   if (g_i_SWR == 0) { atu_reset(); return; }
-   get_swr();
-#if defined(UART) && defined(MPLAB_COMPILER)
-   if (g_b_debug_mode) {
-      uart_puts("DBG FINE_IND");
-      tune_dbg_uint(" ind=", (int)g_c_ind);
-      tune_dbg_uint(" swr=", g_i_SWR);
-      uart_puts("\r\n");
-   }
-#endif
-   if (g_i_SWR < 120) return;
-   sharp_cap();
-   if (g_i_SWR == 0) { atu_reset(); return; }
-   get_swr();
-#if defined(UART) && defined(MPLAB_COMPILER)
-   if (g_b_debug_mode) {
-      uart_puts("DBG FINE_CAP");
-      tune_dbg_uint(" cap=", (int)g_c_cap);
-      tune_dbg_uint(" swr=", g_i_SWR);
-      uart_puts("\r\n");
-   }
-#endif
-   if (g_i_SWR < 120) return;
-   //
-   if (g_i_SWR > l_int_swr_mem)
-   {
-      if (g_c_SW == 1)
-         g_c_SW = 0;
-      else
-         g_c_SW = 1;
-      set_sw(g_c_SW);
-      g_c_ind = l_int_ind_mem;
-      g_c_cap = l_int_cap_mem;
-      set_ind(g_c_ind);
-      set_cap(g_c_cap);
-      get_swr();
-   }
-   //
-#if defined(UART) && defined(MPLAB_COMPILER)
-   if (g_b_debug_mode) {
-      uart_puts("DBG SW_FINE");
-      tune_dbg_uint(" swr=", g_i_SWR);
-      uart_puts("\r\n");
-   }
-#endif
-   CLRWDT();
-   return;
-}
-
 /* ── save tuned relay position to EEPROM band memory ──
  * Saves if SWR < 300 and a valid frequency is known.
  * IND byte is written last — it is the commit sentinel (0xFF = empty slot).
@@ -460,7 +359,7 @@ typedef struct {
     /* frequency and probe result */
     unsigned int  freq_kHz;
     char          probe_matched;
-    /* sub_tune two-pass SW comparison */
+    /* two-pass SW comparison (cap on antenna side vs TX side) */
     unsigned char pass;          /* 0 = original SW, 1 = flipped SW */
     int           swr_before_flip;   /* SWR before deciding to flip */
     unsigned char pass0_ind, pass0_cap;
@@ -470,17 +369,12 @@ typedef struct {
     unsigned char pending_exit;
 } tune_ctx_t;
 
-/* Defined in main.c (firmware) and in atusim.c (simulator).
- * Declared extern here so every TU that includes tune_algo.h shares the
- * single instance — critical because uart_cmd.c calls tune_start() and
- * main.c calls tune_tick(), both of which must see the same state.      */
-extern tune_ctx_t g_tune_ctx;
+/* Defined here, which is sound because this file is compiled into exactly one
+ * translation unit per program: tune_algo.c in the firmware, atusim.c in the
+ * simulator. Other modules reach the state machine through tune_api.h.     */
+tune_ctx_t g_tune_ctx;
 
-#ifdef UART
-extern unsigned char g_b_tune_abort;  /* set by 'q' UART command */
-#endif
-
-static void tune_start(void)
+void tune_start(void)
 {
     /* If already running, do not restart */
     if (g_tune_ctx.state != TS_IDLE) return;
@@ -490,11 +384,30 @@ static void tune_start(void)
 #endif
 }
 
+unsigned char tune_busy(void)
+{
+    return g_tune_ctx.state != TS_IDLE;
+}
+
+/* Restore the L/C step multipliers to their configured values.
+ * TS_EXTRA_IND and TS_EXTRA_CAP force a multiplier to 1 to get a finer scan;
+ * every terminal state has to undo that, or the *next* tune scans a fraction
+ * of the available range with no indication that anything is wrong. */
+static void tune_restore_mults(void)
+{
+    if (e_c_num_L_q == 5)      g_c_L_mult = 1;
+    else if (e_c_num_L_q == 6) g_c_L_mult = 2;
+    else if (e_c_num_L_q == 7) g_c_L_mult = 4;
+    if (e_c_num_C_q == 5)      g_c_C_mult = 1;
+    else if (e_c_num_C_q == 6) g_c_C_mult = 2;
+    else if (e_c_num_C_q == 7) g_c_C_mult = 4;
+}
+
 /* tune_tick() — cooperative state machine dispatcher.
  * Returns 0 while running, 1 when done (state returned to TS_IDLE).
  * Each call executes exactly one sub-phase so the main loop can service
  * UART between phases without relay.c changes.                          */
-static unsigned char tune_tick(void)
+unsigned char tune_tick(void)
 {
     tune_ctx_t *ctx = &g_tune_ctx;
 
@@ -514,6 +427,13 @@ static unsigned char tune_tick(void)
         g_char_tune_effort = 0;
         g_b_slot_saved    = 0;
         g_c_tune_exit     = 0;
+        /* Must be cleared per tune. g_b_tx_seen latches "power was present",
+         * which turns a later power dip into a TX-inhibit abort; carried over
+         * from a previous tune it makes get_swr() abort before the radio has
+         * even keyed, so every tune after the first would silently do nothing.
+         * g_b_rready likewise latches the tune-button release. */
+        g_b_tx_seen       = 0;
+        g_b_rready        = 0;
         ctx->probe_matched = 0;
         ctx->pass          = 0;
         /* Measure frequency; fall back to UART hint if radio is silent */
@@ -860,19 +780,13 @@ static unsigned char tune_tick(void)
             ctx->state = TS_ABORT;
             return 0;
         }
-        /* Restore multipliers to match tune() lines 754-765 */
-        if (e_c_num_L_q == 5)      g_c_L_mult = 1;
-        else if (e_c_num_L_q == 6) g_c_L_mult = 2;
-        else if (e_c_num_L_q == 7) g_c_L_mult = 4;
-        if (e_c_num_C_q == 5)      g_c_C_mult = 1;
-        else if (e_c_num_C_q == 6) g_c_C_mult = 2;
-        else if (e_c_num_C_q == 7) g_c_C_mult = 4;
         get_swr();
         ctx->pending_exit = 13;
         ctx->state = TS_SAVE;
         return 0;
 
     case TS_SAVE:
+        tune_restore_mults();
         g_c_tune_exit = ctx->pending_exit;
         /* Exits that represent successful/partial matches where we save */
         if (ctx->pending_exit != 2u && ctx->pending_exit != 4u
@@ -897,6 +811,7 @@ static unsigned char tune_tick(void)
         return 1;
 
     case TS_ABORT:
+        tune_restore_mults();
         g_c_ind = ctx->pre_ind;
         g_c_cap = ctx->pre_cap;
         g_c_SW  = ctx->pre_sw;
@@ -924,19 +839,6 @@ static unsigned char tune_tick(void)
         /* Unreachable on correct hardware — treat as abort to be safe */
         ctx->state = TS_IDLE;
         return 1;
-    }
-}
-
-/* ── main tuning orchestrator ──
- * Blocking wrapper — used only by atusim; firmware uses tune_start().
- * (tune_btn_push calls tune_start() to avoid overflowing the 8-level
- *  PIC16F1938 hardware call stack; UART tunes use tune_start() too.)   */
-static void tune(void)
-{
-    tune_start();
-    while (g_tune_ctx.state != TS_IDLE) {
-        CLRWDT();
-        tune_tick();
     }
 }
 

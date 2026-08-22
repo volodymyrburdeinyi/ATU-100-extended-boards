@@ -2,47 +2,11 @@
 
 #ifdef UART
 
-unsigned char g_b_debug_mode = 0;
-unsigned char g_b_tune_abort = 0;
-
-/* globals declared in main.h — referenced here */
-extern unsigned char g_c_ind, g_c_cap;
-extern char g_c_SW;
-extern int g_i_SWR;
-extern unsigned int g_i_uart_freq_hint;
-extern unsigned char g_b_slot_saved;
-extern unsigned char g_c_tune_exit;
-extern char g_b_Auto_mode;
-
-/* additional globals required by tune_algo.h functions used here */
-extern char g_c_step_cap, g_c_step_ind;
-extern char g_c_L_mult, g_c_C_mult;
-extern int g_i_P_max, g_i_swr_a;
-extern char g_b_rready, g_char_p_cnt;
-extern char g_b_tx_seen;
-extern unsigned char g_char_tune_effort;
-extern char e_c_b_L_linear, e_c_b_C_linear;
-extern char e_c_num_L_q, e_c_num_C_q;
-extern int e_i_tenths_init_max_swr;
-extern char e_c_b_Loss_ind;
-
-/* HAL functions provided by relay.c and swr.c */
-void set_ind(unsigned char Ind);
-void set_cap(unsigned char Cap);
-void set_sw(char l_sw);
-void atu_reset(void);
-void get_swr(void);
-
-/* display function defined in main.c */
-void lcd_ind(void);
-
-/* measure_freq stub required by tune_algo.h — UART TU always returns 0;
-   the freq hint path in tune() picks up g_i_uart_freq_hint instead */
-static unsigned int measure_freq(void) {
-   return 0;
-}
-
-#include "tune_algo.h"
+#include "globals.h"
+#include "relay.h"
+#include "swr.h"
+#include "tune_api.h"
+#include "uart_cmd.h"
 
 /* ── UART output helpers ── */
 
@@ -110,6 +74,13 @@ void uart_send_status(void)
     uart_puts("\r\n");
 }
 
+/* How far a stored slot may be from the requested frequency and still be worth
+   applying. Wider than the ±25 kHz the tune-time probe uses, because a recall
+   is only a starting point, but bounded: the nearest slot in a band can be
+   hundreds of kHz away, and on a narrow antenna that is a worse starting point
+   than the position the tuner is already in. */
+#define RECALL_TOL_KHZ 150u
+
 /* Find best-matching sub-slot within the current band for l_freq_kHz.
    If found: apply relays, load stored SWR, return 1. Return 0 if no match.
    No live SWR measurement — safe to call in RX (no TX power present). */
@@ -133,6 +104,7 @@ static signed char band_slot_apply_freq(unsigned int l_freq_kHz)
         if (l_sf == 0) continue;
         l_diff = (l_sf > l_freq_kHz) ? (unsigned int)(l_sf - l_freq_kHz)
                                       : (unsigned int)(l_freq_kHz - l_sf);
+        if (l_diff > RECALL_TOL_KHZ) continue;
         if (l_diff < l_best_diff) { l_best_diff = l_diff; l_best_sub = l_sub; }
     }
     if (l_best_sub == 0xFF) return 0;
@@ -140,8 +112,8 @@ static signed char band_slot_apply_freq(unsigned int l_freq_kHz)
     l_base = EEPROM_BAND_SLOT_0 + (unsigned char)(l_slot_idx * (unsigned char)EEPROM_BAND_SLOT_STRIDE);
     l_ind    = eeprom_read(l_base + EEPROM_SLOT_IND);
     l_sw_swr = eeprom_read(l_base + EEPROM_SLOT_SW_SWR);
-    g_c_ind = (char)l_ind;
-    g_c_cap = (char)eeprom_read(l_base + EEPROM_SLOT_CAP);
+    g_c_ind = l_ind;
+    g_c_cap = eeprom_read(l_base + EEPROM_SLOT_CAP);
     g_c_SW  = (char)((l_sw_swr >> 7) & 1u);
     set_ind(g_c_ind);
     set_cap(g_c_cap);
@@ -152,6 +124,17 @@ static signed char band_slot_apply_freq(unsigned int l_freq_kHz)
 
 static void uart_exec_cmd(const char *l_cmd, unsigned char l_len)
 {
+    /* While a tune is running the command parser is being called from inside
+       the relay scan loops, with the transmitter keyed. Only abort and status
+       are safe there: 'r' would move the relays out from under the scan, 'c'
+       would write EEPROM mid-tune, 'm' would hold the line for a second. The
+       daemon already restricts itself to 'q', but RB2 doubles as a button pin
+       on a 1.5 kW tuner, so RF pickup can synthesise a command byte. */
+    if (tune_busy() && l_cmd[0] != 'q' && l_cmd[0] != '?') {
+        uart_puts("BUSY\r\n");
+        return;
+    }
+
     if (l_cmd[0] == 't') {
         /* "t HHHH" — tune; optional 4-digit kHz freq hint in hex e.g. "t 1BA2".
          * tune_start() only queues TS_INIT; main loop drives tune_tick() and sends

@@ -3,8 +3,8 @@
  * Build: gcc -o /tmp/atusim tools/atusim.c -lm && /tmp/atusim
  *
  * The algorithm under test (coarse_cap/coarse_tune/sharp_cap/sharp_ind/
- * sub_tune/tune/band_slot_save) is compiled from the REAL firmware source
- * via the #include at the bottom of the stub section.  There are no copies.
+ * tune_start/tune_tick/band_slot_save) is compiled from the REAL firmware
+ * source via the #include at the bottom of the stub section.  No copies.
  *
  * Scenarios:
  *   S1  bimodal 30m delta loop — global min at high-L must win over local min at low-L
@@ -21,6 +21,8 @@
  *   S12 abort mid-coarse      — relay state restored to pre-tune snapshot
  *   S13 tick budget           — full tune completes in ≤ 25 ticks
  *   S14 abort during sharp    — sim_relay_* physical state restored on inhibit
+ *   S15 two tunes, one power cycle — no reset between; catches latched state
+ *   S16 multiplier restore    — extra-fine pass must not shrink the next scan
  */
 
 #include <stdio.h>
@@ -91,6 +93,11 @@ typedef int (*swr_fn)(unsigned char ind, unsigned char cap, unsigned char sw);
 static swr_fn current_model = NULL;
 static int sim_inhibit_on_call = -1;
 static int sim_call_n = 0;
+/* Number of get_pwr() calls at the start of a tune that report no RF yet, i.e.
+ * the tune command arrived before the transmitter keyed. Real hardware always
+ * does this; without it get_swr()'s power-wait loop is never entered and the
+ * state that loop latches is never exercised. */
+static int sim_pwr_low_calls = 0;
 static unsigned int sim_freq = 0;
 
 /* Physical relay state: separate from the algorithm's g_c_ind/g_c_cap tracking
@@ -141,45 +148,62 @@ static void get_pwr(void) {
         g_i_SWR = 999;
         return;
     }
+    if (sim_pwr_low_calls > 0) {
+        sim_pwr_low_calls--;
+        g_i_PWR = 0;
+        g_i_SWR = 999;
+        return;
+    }
     g_i_PWR = 5;
     g_i_SWR = current_model ? current_model(sim_relay_ind, sim_relay_cap, sim_relay_sw) : 999;
 }
 
-static void get_swr(void) {
-    get_pwr();
-    if (g_char_p_cnt != 100)
-    {
+/* mirrors swr.c track_peak_power() */
+static void track_peak_power(void) {
+    if (g_char_p_cnt != 100) {
         g_char_p_cnt += 1;
         if (g_i_PWR > g_i_P_max)
             g_i_P_max = g_i_PWR;
-    }
-    if (g_char_tune_effort < 255) {
-        g_char_tune_effort++;
     } else {
         g_char_p_cnt = 0;
         show_pwr(g_i_P_max, g_i_SWR);  /* mirrors firmware display refresh */
         g_i_P_max = 0;
     }
+}
+
+/* Mirrors swr.c get_swr(), minus Button() polling (hardware readiness, not the
+ * search algorithm). The power-wait loop IS modelled: it is where a tune waits
+ * for the transmitter, and the flags it latches persist across tunes. */
+#define SIM_PWR_WAIT_MAX_PASSES 1200
+static void get_swr(void) {
+    int l_wait_passes = 0;
+    get_pwr();
+    track_peak_power();
+    if (g_char_tune_effort < 255)
+        g_char_tune_effort++;
     if (g_i_PWR >= e_i_watts_min_for_start)
         g_b_tx_seen = 1;
-    /* simplified: no Button() polling; check both min and max power bounds */
     while ((g_i_PWR < e_i_watts_min_for_start) ||
            (g_i_PWR > e_i_watts_max_for_start && e_i_watts_max_for_start > 0)) {
-        if (g_b_tx_seen == 1) {
+        if (g_b_tx_seen == 1) {   /* had power, lost it: TX inhibit */
             g_i_SWR = 0;
             return;
         }
-        show_reset();  /* mirrors firmware button-cancel path */
-        return;
+        if (g_b_tune_abort) {
+            g_i_SWR = 0;
+            return;
+        }
+        if (++l_wait_passes >= SIM_PWR_WAIT_MAX_PASSES) {
+            g_i_SWR = 0;          /* transmitter never keyed */
+            return;
+        }
+        get_pwr();
+        track_peak_power();
     }
 }
 
 /* ── real algorithm: compiled from firmware source (not a copy) ── */
 #include "../ATU_100_EXT_board/FirmWare_PIC16F1938/1938_EXT_MPLAB_sources_V_3.2/tune_algo.h"
-
-/* tune_ctx_t is defined by tune_algo.h above; define the shared instance here
- * to satisfy the extern declaration inside tune_algo.h.                       */
-tune_ctx_t g_tune_ctx;
 
 /* ── SWR models ─────────────────────────────────────────────────────────────
  *
@@ -274,6 +298,8 @@ static void reset_state(void)
     g_b_slot_saved = 0; g_c_tune_exit = 0; g_i_uart_freq_hint = 0;
     g_b_tune_abort = 0;
     sim_call_n = 0; sim_inhibit_on_call = -1; sim_freq = 0;
+    sim_pwr_low_calls = 0;
+    e_c_num_L_q = 7; e_c_num_C_q = 7;
     sim_relay_ind = 0; sim_relay_cap = 0; sim_relay_sw = 0;
     e_i_tenths_init_max_swr = 0;
     eeprom_reset();
@@ -631,6 +657,48 @@ int main(void)
               r.ind == pre_ind && r.cap == pre_cap && r.sw == pre_sw
               && sim_relay_ind == pre_ind && sim_relay_cap == pre_cap
               && sim_relay_sw == pre_sw, r);
+    }
+
+    /* S15: two tunes within a single power cycle.
+     * Every other scenario calls reset_state() first, which clears globals that
+     * real hardware only clears at power-on — so state latched by one tune and
+     * read by the next was invisible to this suite. g_b_tx_seen is the one that
+     * matters: it means "RF was present, so a power drop is a TX inhibit", and
+     * carried into the next tune it fires before the transmitter has keyed. */
+    {
+        unsigned char first_exit;
+        int first_swr;
+        reset_state();
+        current_model = model_simple_20m;
+        sim_pwr_low_calls = 3;          /* radio keys just after the command */
+        run_tune(0x3722);               /* 14114 kHz */
+        first_exit = g_c_tune_exit;
+        first_swr  = g_i_SWR;
+
+        /* Operator moves to 30m. Deliberately NO reset_state(): same power
+         * cycle, so whatever the first tune latched is still latched. */
+        current_model = model_bimodal_30m;
+        sim_pwr_low_calls = 3;
+        run_tune(0x2778);               /* 10104 kHz — different band, probe misses */
+        result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
+        CHECK("S15 second tune in one power cycle — not killed by stale tx_seen",
+              first_exit != 1 && first_swr > 0 && first_swr < 130
+              && g_c_tune_exit != 1 && g_i_SWR > 0 && g_i_SWR < 130, r);
+    }
+
+    /* S16: the extra-fine pass must hand back the step multipliers.
+     * TS_EXTRA_IND drops g_c_L_mult to 1 to scan at single-inductor resolution.
+     * If a terminal state does not restore it, the next tune's coarse scan
+     * silently covers a quarter of the inductance range. */
+    {
+        reset_state();
+        e_c_num_C_q = 5;               /* no extra-fine cap pass ...        */
+        g_c_C_mult  = 1;               /* ... so C_mult is 1 by configuration */
+        current_model = model_flat;    /* never reaches SWR < 120: long path */
+        run_tune(0);
+        result_t r = { g_c_ind, g_c_cap, g_c_SW, g_i_SWR };
+        CHECK("S16 extra-fine ind pass restores L multiplier for the next tune",
+              g_c_L_mult == 4 && g_c_C_mult == 1, r);
     }
 
     printf("\n%d/%d passed\n", passed, total);

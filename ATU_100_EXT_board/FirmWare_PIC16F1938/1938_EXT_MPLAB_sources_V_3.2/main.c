@@ -7,17 +7,17 @@
 #include "main.h"
 #include "uart_cmd.h"
 
-// Variables
-char g_b_Auto_mode = 0;
+/* State private to main.c. Anything shared across modules is in globals.h. */
+static char g_b_Bypas_mode = 0;
+static char g_c_cap_mem = 0, g_c_ind_mem = 0, g_c_SW_mem = 0, g_c_Auto_mem = 0;
 
-char g_b_Bypas_mode = 0;
-char g_c_cap_mem = 0, g_c_ind_mem = 0, g_c_SW_mem = 0, g_c_Auto_mem = 0;
+static char g_b_Restart = 0;
+static char g_b_Test_mode = 0;
+static char g_b_L = 1, g_b_but = 0;
 
-char g_b_Restart = 0;
-char g_b_Test_mode = 0;
-char g_b_L = 1, g_b_but = 0;
+static char g_b_tune_btn_released;
 
-char g_b_tune_btn_released;
+static void save_last_tune_state(void);
 
 /*  initial eeprom values*/
 __eeprom unsigned char initial_eeprom[256] = {
@@ -122,7 +122,7 @@ void main()
 
    //
    /*  test mode?   enter step by step adjustments */
-   if (PORTB_AUTO_BUTTON == BUTTON_PRESSED & PORTB_BYPASS_BUTTON == BUTTON_PRESSED)
+   if (PORTB_AUTO_BUTTON == BUTTON_PRESSED && PORTB_BYPASS_BUTTON == BUTTON_PRESSED)
    { // g_b_Test_mode mode
       g_b_Test_mode = 1;
       g_b_Auto_mode = 0;
@@ -200,6 +200,9 @@ void main()
 #ifdef UART
       uart_cmd_proc();
       if (tune_tick()) {
+         /* Tune finished (or aborted) — relay state is settled, persist it
+            and report. Applies to button and UART tunes alike. */
+         save_last_tune_state();
          uart_send_status();
       }
 #endif
@@ -240,12 +243,12 @@ void button_proc_test(void)
       CLRWDT();
       while (PORTB_BYPASS_BUTTON == BUTTON_PRESSED)
       {
-         if (g_b_L & (g_c_ind < 32 * g_c_L_mult - 1))
+         if (g_b_L && (g_c_ind < 32 * g_c_L_mult - 1))
          {
             g_c_ind++;
             set_ind(g_c_ind);
          }
-         else if (!g_b_L & (g_c_cap < 32 * g_c_L_mult - 1))
+         else if (!g_b_L && (g_c_cap < 32 * g_c_C_mult - 1))
          {
             g_c_cap++;
             set_cap(g_c_cap);
@@ -255,17 +258,17 @@ void button_proc_test(void)
       }
    } // end of BYP button
    //
-   if (Button(&PORTB, AUTO_BUTTON, 50, BUTTON_PRESSED) & (g_b_Bypas_mode == 0))
+   if ((g_b_Bypas_mode == 0) && Button(&PORTB, AUTO_BUTTON, 50, BUTTON_PRESSED))
    { // g_b_Auto_mode button
       CLRWDT();
       while (PORTB_AUTO_BUTTON == BUTTON_PRESSED)
       {
-         if (g_b_L & (g_c_ind > 0))
+         if (g_b_L && (g_c_ind > 0))
          {
             g_c_ind--;
             set_ind(g_c_ind);
          }
-         else if (!g_b_L & (g_c_cap > 0))
+         else if (!g_b_L && (g_c_cap > 0))
          {
             g_c_cap--;
             set_cap(g_c_cap);
@@ -279,9 +282,13 @@ void button_proc_test(void)
 
 void button_proc(void)
 {
-   if ((g_b_tune_btn_released == 0) & Button(&PORTB, TUNE_BUTTON, 50, BUTTON_RELEASED))
+   /* && not & : Button() blocks for its full debounce window whenever the pin
+      is already in the state being tested, and "released" is the normal state.
+      With & both operands are always evaluated, so every pass through the main
+      loop paid 50 ms — delaying UART service and each tune_tick() phase. */
+   if ((g_b_tune_btn_released == 0) && Button(&PORTB, TUNE_BUTTON, 50, BUTTON_RELEASED))
       g_b_tune_btn_released = 1;
-   if (Button(&PORTB, TUNE_BUTTON, 50, BUTTON_PRESSED) & g_b_tune_btn_released)
+   if (g_b_tune_btn_released && Button(&PORTB, TUNE_BUTTON, 50, BUTTON_PRESSED))
    {
       Delay_ms(250);
       CLRWDT();
@@ -290,21 +297,19 @@ void button_proc(void)
          atu_reset();
          g_c_SW = 1;
          set_sw(g_c_SW);
-         eeprom_write(EEPROM_LAST_CAP, 0);
-         eeprom_write(EEPROM_LAST_IND, 0);
-         eeprom_write(EEPROM_LAST_SW, 1);
-         eeprom_write(EEPROM_LAST_SWR_H, 0);
-         eeprom_write(EEPROM_LAST_SWR_L, 0);
-         p_Tx = 0;
-         n_Tx = 1;
+         eeprom_store(EEPROM_LAST_CAP, 0);
+         eeprom_store(EEPROM_LAST_IND, 0);
+         eeprom_store(EEPROM_LAST_SW, 1);
+         eeprom_store(EEPROM_LAST_SWR_H, 0);
+         eeprom_store(EEPROM_LAST_SWR_L, 0);
+         TX_REQUEST_OFF();
          g_i_SWR = 0;
          g_i_PWR = 0;
          g_b_Bypas_mode = 0;
       }
       else
       {                 // long press button
-         p_Tx = 1;      //
-         n_Tx = 0;      // TX request
+         TX_REQUEST_ON();
          Delay_ms(250); //
          tune_btn_push();
          g_b_Bypas_mode = 0;
@@ -351,7 +356,7 @@ void button_proc(void)
       }
    }
    //
-   if (Button(&PORTB, AUTO_BUTTON, 50, BUTTON_PRESSED) & (g_b_Bypas_mode == 0))
+   if ((g_b_Bypas_mode == 0) && Button(&PORTB, AUTO_BUTTON, 50, BUTTON_PRESSED))
    { // g_b_Auto_mode button
       CLRWDT();
       if (g_b_Auto_mode == 0)
@@ -373,13 +378,12 @@ void show_reset()
    atu_reset();
    g_c_SW = 1;
    set_sw(g_c_SW);
-   eeprom_write(EEPROM_LAST_CAP, 0);
-   eeprom_write(EEPROM_LAST_IND, 0);
-   eeprom_write(EEPROM_LAST_SW, 1);
-   eeprom_write(EEPROM_LAST_SWR_H, 0);
-   eeprom_write(EEPROM_LAST_SWR_L, 0);
-   p_Tx = 0;
-   n_Tx = 1;
+   eeprom_store(EEPROM_LAST_CAP, 0);
+   eeprom_store(EEPROM_LAST_IND, 0);
+   eeprom_store(EEPROM_LAST_SW, 1);
+   eeprom_store(EEPROM_LAST_SWR_H, 0);
+   eeprom_store(EEPROM_LAST_SWR_L, 0);
+   TX_REQUEST_OFF();
    g_i_SWR = 0;
    g_i_PWR = 0;
    return;
@@ -387,23 +391,12 @@ void show_reset()
 
 void tune_btn_push()
 {
-   /* Use tune_start() rather than blocking tune() to avoid the 9-frame call chain
-    * (main→button_proc→tune_btn_push→tune→tune_tick→coarse_tune→coarse_cap→get_swr→get_pwr)
-    * which overflows the PIC16F1938 8-level hardware call stack at get_pwr().
-    * tune_tick() is called cooperatively in the main loop's UART branch and will
-    * run the tune to completion there; the EEPROM writes below happen immediately
-    * after tune_start() sets TS_INIT — they will capture the pre-tune values until
-    * the next loop iteration completes the tune and updates the globals.            */
+   /* Only queues the tune: the main loop drives tune_tick() to completion so
+    * that UART stays serviced and 'q' can still abort. The tuned position is
+    * persisted by save_last_tune_state() when tune_tick() reports done —
+    * doing it here would only ever store the pre-tune position. */
    CLRWDT();
    tune_start();
-   eeprom_write(EEPROM_LAST_CAP, g_c_cap);
-   eeprom_write(EEPROM_LAST_IND, g_c_ind);
-   eeprom_write(EEPROM_LAST_SW, g_c_SW);
-   eeprom_write(EEPROM_LAST_SWR_H, (char)(g_i_swr_a / 256));
-   eeprom_write(EEPROM_LAST_SWR_L, (char)(g_i_swr_a % 256));
-   p_Tx = 0;
-   n_Tx = 1;
-   CLRWDT();
    return;
 }
 
@@ -417,7 +410,7 @@ void lcd_ind(void)
 
 void button_delay()
 {
-   if ((Button(&PORTB, TUNE_BUTTON, 25, BUTTON_PRESSED)) | (Button(&PORTB, AUTO_BUTTON, 25, BUTTON_PRESSED)) | (Button(&PORTB, BYPASS_BUTTON, 25, BUTTON_PRESSED)))
+   if (Button(&PORTB, TUNE_BUTTON, 25, BUTTON_PRESSED) || Button(&PORTB, AUTO_BUTTON, 25, BUTTON_PRESSED) || Button(&PORTB, BYPASS_BUTTON, 25, BUTTON_PRESSED))
    {
       g_b_but = 1;
    }
@@ -430,9 +423,9 @@ void Test_init(void)
    atu_reset();
    g_c_SW = 1;
    set_sw(g_c_SW);
-   eeprom_write(EEPROM_LAST_CAP, g_c_cap);
-   eeprom_write(EEPROM_LAST_IND, g_c_ind);
-   eeprom_write(EEPROM_LAST_SW, g_c_SW);
+   eeprom_store(EEPROM_LAST_CAP, g_c_cap);
+   eeprom_store(EEPROM_LAST_IND, g_c_ind);
+   eeprom_store(EEPROM_LAST_SW, (unsigned char)g_c_SW);
    return;
 }
 
@@ -495,15 +488,16 @@ void cells_init(void)
    return;
 }
 
-/* Cooperative tune state machine context — shared across all TUs.
- * uart_cmd.c calls tune_start(); main loop calls tune_tick().
- * Zero-initialised at startup (state = TS_IDLE).                */
-tune_ctx_t g_tune_ctx;
-
-#ifdef UART
-
-unsigned int  g_i_uart_freq_hint = 0;
-unsigned char g_b_slot_saved     = 0;
-unsigned char g_c_tune_exit      = 0;   /* set to exit-path code by tune() for diagnostics */
-
-#endif /* UART */
+/* Relay position and SWR of the last completed tune, so the tuner comes back
+ * matched after a power cycle. Written when tune_tick() reports completion —
+ * writing them at tune *start* only ever persisted the pre-tune position.
+ * eeprom_store() skips unchanged cells: these five are the most frequently
+ * rewritten in the device, and the part is rated for 100k cycles. */
+static void save_last_tune_state(void)
+{
+   eeprom_store(EEPROM_LAST_CAP, g_c_cap);
+   eeprom_store(EEPROM_LAST_IND, g_c_ind);
+   eeprom_store(EEPROM_LAST_SW, (unsigned char)g_c_SW);
+   eeprom_store(EEPROM_LAST_SWR_H, (unsigned char)(g_i_swr_a / 256));
+   eeprom_store(EEPROM_LAST_SWR_L, (unsigned char)(g_i_swr_a % 256));
+}

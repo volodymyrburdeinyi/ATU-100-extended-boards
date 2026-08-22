@@ -1,19 +1,16 @@
 #include "cross_compiler.h"
-
-/* globals declared in main.h — referenced here */
-extern int g_i_PWR, g_i_SWR, g_i_P_max;
-extern char g_char_p_cnt;
-extern unsigned char g_char_tune_effort;
-extern char g_b_Overload;
-extern char g_b_tx_seen;
-extern char g_b_rready;
-extern char e_c_b_D_correction;
-extern char e_c_b_P_High;
-extern char e_c_K_Mult;
-extern int e_i_watts_min_for_start, e_i_watts_max_for_start;
+#include "globals.h"
+#include "swr.h"
 
 /* show_reset() defined in main.c — called from get_swr() button-abort path */
 void show_reset(void);
+
+/* Upper bound on how long get_swr() will sit waiting for the transmitter to
+ * key up. Each pass is one ADC set plus a 5 ms button debounce, ~8 ms, so
+ * this is roughly ten seconds. Without it a tune requested while the radio
+ * stays silent never returns, and since the main loop is what services UART,
+ * the tuner cannot even be told to stop. */
+#define PWR_WAIT_MAX_PASSES 1200u
 
 int correction(int input)
 {
@@ -151,21 +148,31 @@ void get_pwr()
    return;
 }
 
-void get_swr()
+/* Rolling peak-power window: sample until the window is full, then start over.
+ * Kept in one place so the two call sites below cannot drift apart. */
+static void track_peak_power(void)
 {
-   get_pwr();
    if (g_char_p_cnt != 100)
    {
       g_char_p_cnt += 1;
       if (g_i_PWR > g_i_P_max)
          g_i_P_max = g_i_PWR;
    }
-   if (g_char_tune_effort < 255) g_char_tune_effort++;
    else
    {
       g_char_p_cnt = 0;
       g_i_P_max = 0;
    }
+}
+
+void get_swr()
+{
+   unsigned int l_wait_passes = 0;
+
+   get_pwr();
+   track_peak_power();
+   if (g_char_tune_effort < 255)
+      g_char_tune_effort++;
    if (g_i_PWR >= e_i_watts_min_for_start)
       g_b_tx_seen = 1;
    while ((g_i_PWR < e_i_watts_min_for_start) || (g_i_PWR > e_i_watts_max_for_start && e_i_watts_max_for_start > 0))
@@ -176,18 +183,24 @@ void get_swr()
          return;
       }
       CLRWDT();
+#ifdef UART
+      /* This loop, not the relay scans, is where a tune actually sits waiting.
+         The main loop is blocked while we are here, so poll the UART directly
+         or 'q' cannot be acted on until the radio keys — which may be never. */
+      uart_cmd_proc();
+      if (g_b_tune_abort)
+      {
+         g_i_SWR = 0;
+         return;
+      }
+#endif
+      if (++l_wait_passes >= PWR_WAIT_MAX_PASSES)
+      { // transmitter never keyed — give up rather than hang the main loop
+         g_i_SWR = 0;
+         return;
+      }
       get_pwr();
-      if (g_char_p_cnt != 100)
-      {
-         g_char_p_cnt += 1;
-         if (g_i_PWR > g_i_P_max)
-            g_i_P_max = g_i_PWR;
-      }
-      else
-      {
-         g_char_p_cnt = 0;
-         g_i_P_max = 0;
-      }
+      track_peak_power();
       //
       if (Button(&PORTB, TUNE_BUTTON, 5, BUTTON_RELEASED))
          g_b_rready = 1;

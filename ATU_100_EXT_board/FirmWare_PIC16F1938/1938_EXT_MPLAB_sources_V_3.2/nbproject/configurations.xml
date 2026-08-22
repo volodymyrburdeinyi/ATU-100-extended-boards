@@ -6,6 +6,12 @@
                    projectFiles="true">
       <itemPath>main.h</itemPath>
       <itemPath>cross_compiler.h</itemPath>
+      <itemPath>globals.h</itemPath>
+      <itemPath>relay.h</itemPath>
+      <itemPath>swr.h</itemPath>
+      <itemPath>uart_cmd.h</itemPath>
+      <itemPath>tune_api.h</itemPath>
+      <itemPath>tune_algo.h</itemPath>
     </logicalFolder>
     <logicalFolder name="LinkerScript"
                    displayName="Linker Files"
@@ -15,6 +21,8 @@
                    displayName="Source Files"
                    projectFiles="true">
       <itemPath>main.c</itemPath>
+      <itemPath>globals.c</itemPath>
+      <itemPath>tune_algo.c</itemPath>
       <itemPath>pic_init.c</itemPath>
       <itemPath>cross_compiler.c</itemPath>
       <itemPath>uart.c</itemPath>

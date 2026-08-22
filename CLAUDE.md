@@ -55,9 +55,37 @@ or after firmware upgrade (version mismatch at 0x36).
 
 ## Firmware files
 
-- `ATU_100_EXT_board/FirmWare_PIC16F1938/1938_EXT_MPLAB_sources_V_3.2/main.h` — algorithm functions (tune, sub_tune, coarse_tune, coarse_cap, sharp_ind, sharp_cap, band_slot_save, get_swr)
-- `ATU_100_EXT_board/FirmWare_PIC16F1938/1938_EXT_MPLAB_sources_V_3.2/main.c` — main loop, EEPROM init table, display/button handling
-- `ATU_100_EXT_board/FirmWare_PIC16F1938/1938_EXT_MPLAB_sources_V_3.2/cross_compiler.h` — EEPROM address defines, pin defines, XC8/MikroC portability layer
+All paths under `ATU_100_EXT_board/FirmWare_PIC16F1938/1938_EXT_MPLAB_sources_V_3.2/`.
+
+| File | Contains |
+|------|----------|
+| `globals.h` / `globals.c` | every global shared across modules — declared once, defined once |
+| `tune_algo.h` | the tuning algorithm: coarse_cap, coarse_tune, sharp_cap, sharp_ind, band_slot_save, the TS_* state machine |
+| `tune_algo.c` | the **only** firmware TU that compiles `tune_algo.h` (it defines `g_tune_ctx`) |
+| `tune_api.h` | what the rest of the firmware may call: `tune_start`, `tune_tick`, `tune_busy`, `freq_to_band_idx` |
+| `main.c` / `main.h` | main loop, EEPROM init table, button handling |
+| `relay.c` `swr.c` `uart.c` `uart_cmd.c` | relay HAL, SWR/power measurement, bit-bang serial, command parser |
+| `cross_compiler.h` | EEPROM address defines, pin defines, XC8/MikroC portability layer |
+
+Two rules the layout depends on:
+
+- **Never define a shared global in a header.** They live in `globals.c`; headers
+  declare them `extern`. A `static` definition in a header cannot link once more
+  than one module needs it.
+- **Never `#include "tune_algo.h"` from a second translation unit.** It defines
+  `g_tune_ctx` and its function bodies; include `tune_api.h` instead.
+
+## Host build check
+
+```bash
+tools/hostbuild/build.sh
+```
+
+Compiles and links every firmware translation unit with the host compiler
+against stubbed SFRs (`tools/hostbuild/xc.h`). It says nothing about timing,
+peripherals or code size — its job is to catch syntax errors, type errors and
+undefined symbols without an XC8 installation. Run it before every commit; the
+pre-commit hook does.
 
 ## Algorithm regression simulator
 
@@ -65,17 +93,37 @@ or after firmware upgrade (version mismatch at 0x36).
 gcc -o /tmp/atusim tools/atusim.c -lm && /tmp/atusim
 ```
 
-10 scenarios: bimodal 30m, flat unmatchable, simple 20m, TX-inhibit abort, band probe hit (kHz recall), slot write (kHz save), cross-band isolation, upsert update, evict worst-SWR, cross-band no-touch. Must all PASS before committing. The pre-commit hook runs this automatically.
+16 scenarios, all must PASS. The pre-commit hook runs this automatically.
+
+S1 bimodal 30m, S2 flat unmatchable, S3 simple 20m, S4 TX-inhibit abort,
+S5 band probe hit, S6 slot write, S7 cross-band probe miss, S8 upsert update,
+S9 evict worst-SWR, S10 cross-band isolation, S11 jittery ADC, S12 abort
+mid-coarse, S13 tick budget, S14 abort during sharp, S15 two tunes in one power
+cycle, S16 multiplier restore.
+
+S15 is the one to keep in mind when adding scenarios: every other test calls
+`reset_state()` first, which clears globals that real hardware only clears at
+power-on. State latched by one tune and read by the next is invisible unless a
+scenario deliberately skips the reset.
 
 ## UART protocol (kHz-based, V2)
 
 - `t HHHH` — tune with freq hint in kHz hex (e.g. `t 1BA2` = 7074 kHz)
-- `l HHHH` — recall nearest sub-slot for freq (e.g. `l 1BA2`)
+- `l HHHH` — recall nearest sub-slot within ±150 kHz (e.g. `l 1BA2`)
 - `m`       — dump all 30 band sub-slots
 - `e HH`   — read EEPROM cell
 - `c HH VV` — write EEPROM cell
+- `q`       — abort a running tune
+- `d 0|1`  — DBG telemetry off/on
 
-`g_i_uart_freq_hint` (`unsigned int`) carries the kHz value from `t HHHH` into `tune()`.
+While a tune is running the firmware answers `BUSY` to everything except `q`
+and `?`. The parser is called from inside the relay scan loops with the
+transmitter keyed, and RB2 (the RX pin) is also a button pin on a 1.5 kW
+tuner — a command synthesised by RF pickup must not be able to move relays or
+write EEPROM mid-scan.
+
+`g_i_uart_freq_hint` (`unsigned int`) carries the kHz value from `t HHHH` into
+the tune state machine.
 
 ## Pre-commit hook
 
@@ -83,7 +131,11 @@ gcc -o /tmp/atusim tools/atusim.c -lm && /tmp/atusim
 cp hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 ```
 
-Checks: Fix 1 (lcd_swr parameter), Fix 2a/2b (non-greedy coarse scan), Fix 3 (sub_tune SW-revert live SWR), band_slot_save unsigned char, probe loop unsigned char.
+Runs, in order: the host build, the 16 simulator scenarios, then static checks —
+Fix 1 (lcd_swr absent), Fix 2a/2b (non-greedy coarse scan), Fix 3 (SW-revert
+re-measures), band_slot_save unsigned char, probe loop unsigned char, TS_INIT
+clears `g_b_tx_seen`, TS_SAVE/TS_ABORT restore the L/C multipliers, IntToStr
+NUL-terminates, sharp_cap/sharp_ind full-range, TS_ABORT restores relays.
 
 
 ## Skills

@@ -9,16 +9,16 @@ void uart_tx_bit_bang(unsigned char val)
     INTCONbits.GIE = 0;
 
     UART_OUT_PIN = 0;                    /* start bit                   */
-    Delay_100_us();
+    Delay_bit_9600();
     for (i = 8; i != 0; --i)
     {
         UART_OUT_PIN = val & 0x01;
         val >>= 1;
-        Delay_100_us();
+        Delay_bit_9600();
     }
-    UART_OUT_PIN = 1;                    /* stop bit                    */
-    Delay_100_us();
-    Delay_100_us();
+    UART_OUT_PIN = 1;                    /* stop bit + guard time       */
+    Delay_bit_9600();
+    Delay_bit_9600();
 
     INTCONbits.GIE = l_gie;
 }
@@ -27,26 +27,6 @@ void uart_puts(const char *s)
 {
     while (*s)
         uart_tx_bit_bang((unsigned char)*s++);
-}
-
-/* uart_wr_str: display-protocol wrapper used by existing led_wr_str path. */
-void uart_wr_str(char posstr[], char str[], char leng)
-{
-    char i;
-    if (posstr[2] == ' ') posstr[2] = '0';
-    if (posstr[3] == ' ') posstr[3] = '0';
-    if (posstr[4] == ' ') posstr[4] = '0';
-    if (posstr[5] == ' ') posstr[5] = '0';
-    for (i = 2; i < 6; i++)
-        uart_tx_bit_bang(posstr[i]);
-    uart_tx_bit_bang(':');
-    for (i = 0; i < leng; i++)
-    {
-        if (str[i] == 0) break;
-        uart_tx_bit_bang(str[i]);
-    }
-    uart_tx_bit_bang(0x0d);
-    uart_tx_bit_bang(0x0a);
 }
 
 #ifdef UART
@@ -58,7 +38,10 @@ void uart_wr_str(char posstr[], char str[], char leng)
 #define TMR0_1P5BIT  ((unsigned char)(256u - 156u))  /* 100: first sample */
 #define TMR0_1BIT    ((unsigned char)(256u - 104u))  /* 152: per-bit      */
 
-#define UART_RX_BUFSIZE  16u
+/* Must be a power of two — the head/tail wrap is a mask, not a modulo.
+   Sized so a host can send a full command line without the main loop having
+   to drain it mid-line: 32 bytes is ~33 ms of continuous 9600-baud traffic. */
+#define UART_RX_BUFSIZE  32u
 
 static volatile unsigned char v_rx_state;   /* 0=idle, 1..8=bits, 9=stop */
 static volatile unsigned char v_rx_shift;
@@ -90,21 +73,23 @@ void __interrupt() isr(void)
         TMR0 = TMR0_1BIT;
 
         if (v_rx_state >= 1u && v_rx_state <= 8u) {
-            unsigned char l_next;
             v_rx_shift >>= 1;
             if (UART_RX_PIN)
                 v_rx_shift |= 0x80u;
-            if (v_rx_state == 8u) {
-                /* all 8 bits — push to ring buffer if space available   */
-                l_next = (unsigned char)((v_rx_head + 1u) & (UART_RX_BUFSIZE - 1u));
-                if (l_next != v_rx_tail) {
+            v_rx_state++;
+        } else {
+            /* Mid-stop-bit sample. A framing error means the "start bit" was
+               RF pickup on RB2 rather than a real byte, so drop it instead of
+               handing the command parser a byte invented by the transmitter. */
+            if (UART_RX_PIN) {
+                unsigned char l_next =
+                    (unsigned char)((v_rx_head + 1u) & (UART_RX_BUFSIZE - 1u));
+                if (l_next != v_rx_tail) {     /* full buffer: drop, never wrap */
                     v_rx_buf[v_rx_head] = v_rx_shift;
                     v_rx_head = l_next;
                 }
             }
-            v_rx_state++;
-        } else {
-            /* stop bit interval — restore IOC for next byte             */
+            /* re-arm IOC for the next start bit */
             v_rx_state = 0;
             INTCONbits.TMR0IE = 0;
             IOCBFbits.IOCBF2  = 0;

@@ -194,6 +194,9 @@ def serial_cmd(fd, cmd, timeout=5.0):
 def valid_response(cmd, resp):
     if resp is None:
         return False
+    if resp.startswith('BUSY'):
+        # firmware refuses everything but q/? while a tune is running
+        return True
     if cmd.startswith('l'):
         return resp.startswith(('RECALL', 'NOMATCH', 'ERR'))
     if cmd.startswith('t'):
@@ -416,6 +419,26 @@ def run_cmd(port, cmd):
 
 # ── UDP receiver ─────────────────────────────────────────────────────────────
 
+def _abort_tune(fd):
+    """Ask the firmware to abandon an in-progress tune.
+
+    Retried, because the firmware bit-bangs its serial output with interrupts
+    disabled for the duration of each byte: a 'q' that arrives while it is
+    emitting a status or DBG line is simply not seen. Re-sending is safe —
+    the abort flag is idempotent and is cleared at the start of the next tune.
+    Stops as soon as the tune is no longer running.
+    """
+    for _ in range(4):
+        with lock:
+            if not st['tuning']:
+                return
+        try:
+            os.write(fd, b'q\r')
+        except OSError:
+            return
+        time.sleep(0.15)
+
+
 def udp_loop(sock, port):
     sock.settimeout(1.0)
     while not st['quit'].is_set():
@@ -455,10 +478,8 @@ def udp_loop(sock, port):
                 tuning = st['tuning']
                 fd_abort = st['fd']
             if tuning and fd_abort is not None:
-                try:
-                    os.write(fd_abort, b'q\r')
-                except OSError:
-                    pass
+                threading.Thread(target=_abort_tune, args=(fd_abort,),
+                                 daemon=True).start()
         if prev_tx and not tx:
             # TX just ended — fire pending tune or any deferred band change
             st['event'].set()

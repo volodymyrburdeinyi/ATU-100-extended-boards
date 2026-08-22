@@ -164,7 +164,7 @@ gcc -o /tmp/atusim tools/atusim.c -lm && /tmp/atusim
 
 - **Fix 1** — `lcd_swr()` used global `g_i_SWR` instead of the function parameter; display showed wrong SWR after certain tune sequences.
 - **Fix 2a/2b** — Greedy `else break` in `coarse_cap()` and `coarse_tune()` caused the algorithm to stop at a local SWR minimum. Removed; algorithm now scans the full range and keeps the global best.
-- **Fix 3** — After SW-relay experiment in `sub_tune()`, SWR was read from a stale variable instead of re-measured. Now calls `get_swr()` after reverting SW.
+- **Fix 3** — After the SW-relay experiment, SWR was read from a stale variable instead of re-measured. The SW-revert path now calls `get_swr()`. (The two-pass search moved into the `TS_*` state machine when `sub_tune()` was folded into it.)
 - **Fix 5** — On rigs that inhibit TX when SWR exceeds a threshold (e.g. QMX+), `get_swr()` would deadlock waiting for power that never returns. A `g_b_tx_seen` flag distinguishes normal RX-wait from TX-inhibit; on inhibit, tune aborts cleanly and restores the pre-scan relay position.
 
 ## Acknowledgements

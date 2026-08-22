@@ -88,10 +88,14 @@ unsigned int ADC_Get_Sample(char channel)
 
 /*  routine to detect button presses and debouncing.  input parms:
  port number, port-pin number  time in ms to delay, and value to expect.
- * returns 255 if the pin was in the active state for the given period
- * returns 0 otherwise
+ * returns 1 if the pin held the active state for the whole period, else 0.
+ * (it used to return 255 from a signed char, i.e. -1: truthy, but never
+ *  equal to the 255 the comment promised.)
+ *
+ * Note this blocks for the full `time` in ms when the pin IS in the state
+ * being tested — callers must short-circuit with && rather than &.
  * we use PORTB, pins 0, 1 and 2 */
-char Button(volatile unsigned char *port, char pin, char time, char active_state)
+unsigned char Button(volatile unsigned char *port, char pin, char time, char active_state)
 {
   char loop = time;
   char value;
@@ -116,7 +120,7 @@ char Button(volatile unsigned char *port, char pin, char time, char active_state
     Delay_ms(1);
     loop--;
   }
-  return 255;
+  return 1;
 };
 
 unsigned char Bcd2Dec(unsigned char bcdnum)
@@ -136,9 +140,24 @@ void Vdelay_ms(int time_in_ms)
 
 void ADC_Init(void){};
 
-/*   Function creates an OUTPUT string out of a signed number (numerical 
+/*  Write an EEPROM cell only when the value actually changes. An EEPROM write
+ *  costs ~4 ms and one of the cell's ~100k endurance cycles whether or not the
+ *  content differs, and the LAST_* cells are rewritten after every tune. */
+void eeprom_store(unsigned char addr, unsigned char value)
+{
+  if (eeprom_read(addr) != value)
+    eeprom_write(addr, value);
+}
+
+/*   Function creates an OUTPUT string out of a signed number (numerical
  * value of int type).  Output string has fixed width of 6 characters;
- * remaining positions on the left (if any ) are filled with blanks */
+ * remaining positions on the left (if any ) are filled with blanks.
+ *
+ * The result is NUL-terminated, so output must have room for 7 bytes.
+ * Without the terminator every caller that passed the buffer to a string
+ * function walked off the end of it: uart_puts() emitted whatever followed
+ * the buffer until it happened to find a zero, corrupting every status and
+ * DBG line the tuner sent. */
 void IntToStr(int number, char *output)
 {
   char *p = output;
@@ -149,6 +168,7 @@ void IntToStr(int number, char *output)
     p++;
     loopcounter++;
   } while (loopcounter < 6);
+  *p = '\0';
   p = output + 5; /* point to the last digit */
   if (number >= 0)
   {
